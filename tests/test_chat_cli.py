@@ -250,3 +250,34 @@ def test_drain_skip_leaves_pr_pending_and_deadlocked(cli, project_root):
     assert {"pr": pr_a, "action": "skip"} in out["resolved"]
     assert out["still_pending"] == [pr_a]
     assert PRRegistry.load(project_root)[pr_a].status == PRStatus.DEADLOCKED
+
+
+def test_notify_sprint_start_sends(project_root, monkeypatch):
+    # exercise the notifier wiring directly: configure telegram + capture the
+    # outbound payload via the HTTP chokepoint (the subprocess `cli` fixture
+    # can't easily share monkeypatched env/state).
+    from agensuite import notify as notify_mod
+
+    (project_root / "state").mkdir(exist_ok=True)
+    (project_root / "state" / "notify.json").write_text(
+        json.dumps({"channel": "telegram", "chat_id": "42",
+                    "events": ["sprint-start"]})
+    )
+    sent = []
+    monkeypatch.setattr(notify_mod, "_telegram_call",
+                        lambda t, m, p: sent.append(p) or {"ok": True})
+    monkeypatch.setenv("AGENSUITE_TELEGRAM_TOKEN", "tok")
+
+    n = notify_mod.load_notifier(project_root)
+    n.send("Sprint start", "s — debate opening", event="sprint-start")
+    assert sent and "Sprint start" in sent[0]["text"]
+
+
+def test_notify_sprint_start_command_runs(cli, project_root):
+    # smoke: with no chat config the command is a no-op but must exit 0 and
+    # emit its JSON receipt.
+    cli("bootstrap")
+    p = cli("notify", "sprint-start", "--sprint", "s")
+    out = json.loads(p.stdout)
+    assert out["notified"] == "sprint-start"
+    assert out["sprint"] == "s"

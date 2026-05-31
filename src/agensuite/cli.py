@@ -93,6 +93,7 @@ chief_app = typer.Typer(
     help="Customize executive personas without opening files.",
     no_args_is_help=True,
 )
+notify_app = typer.Typer(help="Outbound chat notifications.", no_args_is_help=True)
 
 app.add_typer(pr_app, name="pr")
 app.add_typer(sprint_app, name="sprint")
@@ -100,6 +101,7 @@ app.add_typer(debate_app, name="debate")
 app.add_typer(adr_app, name="adr")
 app.add_typer(state_app, name="state")
 app.add_typer(chief_app, name="chief")
+app.add_typer(notify_app, name="notify")
 
 
 # ---------------------------------------------------------------------------
@@ -1685,7 +1687,29 @@ def adr_record(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    load_notifier(root).send("Decision", decision, event="decision")
     typer.echo(json.dumps({"adr_id": adr_id, "sha": sha}))
+
+
+# ---------------------------------------------------------------------------
+# notify
+# ---------------------------------------------------------------------------
+
+
+@notify_app.command("sprint-start")
+def notify_sprint_start(
+    ctx: typer.Context,
+    sprint: str = typer.Option(..., "--sprint"),
+) -> None:
+    """Send a 'sprint started' notice to chat (no-op if chat unconfigured)."""
+    root = _root(ctx)
+    cfg = _load_sprint_or_die(root, sprint)
+    load_notifier(root).send(
+        "Sprint start",
+        f"{cfg.id}: {cfg.title}\nParticipants: {', '.join(cfg.participants)}",
+        event="sprint-start",
+    )
+    typer.echo(json.dumps({"notified": "sprint-start", "sprint": sprint}))
 
 
 # ---------------------------------------------------------------------------
