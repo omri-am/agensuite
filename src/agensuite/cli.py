@@ -1218,6 +1218,9 @@ def human_gate(
     follow-up, and applies the human's choice. This is the only path that
     can merge a PR whose status is DEADLOCKED.
     """
+    if async_gate and not resolve_deadlocks:
+        raise _err("--async requires --resolve-deadlocks")
+
     if drain:
         if not sprint:
             raise _err("--drain requires --sprint <id>")
@@ -1381,8 +1384,11 @@ def _async_gate(ctx: typer.Context, sprint: str) -> None:
             mb = GateMailbox(root)
             mb.save_pending(pending)
             mb.clear_inbox()
-        # send outside the lock — network must not hold the state mutex
-        load_notifier(root).send_gate(pending)
+        # send outside the lock — network must not hold the state mutex. Skip
+        # the send when there are no deadlocks: a "decision needed" message
+        # with zero buttons would only confuse the human.
+        if deadlocked:
+            load_notifier(root).send_gate(pending)
         typer.echo(json.dumps(
             {"status": "awaiting_human", "pending": [p.id for p in deadlocked]}
         ))

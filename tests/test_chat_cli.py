@@ -52,6 +52,8 @@ def test_async_gate_writes_pending_and_returns_awaiting(cli, project_root):
     pending = json.loads((project_root / "state" / "gate_pending.json").read_text())
     assert pending["sprint_id"] == "s"
     assert pending["prs"][0]["pr_id"] == pr_a
+    # --async clears the inbox so a stale tap from a prior gate can't leak in
+    assert json.loads((project_root / "state" / "gate_inbox.json").read_text()) == []
 
 
 def test_async_gate_no_deadlocks_is_clean(cli, project_root):
@@ -61,3 +63,10 @@ def test_async_gate_no_deadlocks_is_clean(cli, project_root):
     out = json.loads(p.stdout)
     assert out["status"] == "awaiting_human"
     assert out["pending"] == []
+
+
+def test_async_without_resolve_deadlocks_errors(cli, project_root):
+    cli("bootstrap")
+    p = cli("human-gate", "--sprint", "s", "--async", expect_ok=False)
+    assert p.returncode == 1
+    assert "--async requires --resolve-deadlocks" in p.stderr
