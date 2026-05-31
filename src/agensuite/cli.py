@@ -41,7 +41,7 @@ from .models import (
     Verdict,
 )
 from .gate_mailbox import GateMailbox, PendingGate, PendingPR
-from .notify import load_notifier
+from .notify import load_notifier, _telegram_call
 from .sprint_loader import SprintParseError, list_sprints, load_sprint
 from .state import (
     DebateStore,
@@ -1400,6 +1400,76 @@ def _async_gate(ctx: typer.Context, sprint: str) -> None:
 
 def _drain_gate(ctx: typer.Context, sprint: str, *, wait: bool, timeout: float) -> None:
     raise _err("--drain not yet implemented")  # replaced in Task 6
+
+
+# ---------------------------------------------------------------------------
+# bot sidecar
+# ---------------------------------------------------------------------------
+
+
+def _bot_poll_once(root: Path, token: str, mailbox: "GateMailbox") -> int:
+    """Process one ``getUpdates`` batch. Returns the next offset.
+
+    Pure relay: validates each ``callback_query`` against gate_pending and
+    appends legal taps to the inbox. Never touches the PR registry. Always
+    advances the offset past every update so a poisoned update can't wedge
+    the bot.
+    """
+    offset = mailbox.load_offset()
+    resp = _telegram_call(
+        token, "getUpdates", {"offset": offset, "timeout": 25}
+    )
+    next_offset = offset
+    for update in resp.get("result", []):
+        next_offset = max(next_offset, int(update["update_id"]) + 1)
+        cq = update.get("callback_query")
+        if not cq:
+            continue
+        data = cq.get("data", "")
+        pr_id, _, choice = data.partition(":")
+        if mailbox.is_legal(pr_id, choice):
+            mailbox.append_inbox(pr_id=pr_id, choice=choice)
+        try:
+            _telegram_call(token, "answerCallbackQuery", {"callback_query_id": cq["id"]})
+        except Exception:  # noqa: BLE001
+            pass
+    mailbox.save_offset(next_offset)
+    return next_offset
+
+
+@app.command("bot")
+def bot(
+    ctx: typer.Context,
+    once: bool = typer.Option(
+        False, "--once", help="Process a single update batch then exit (for testing)."
+    ),
+    poll_interval: float = typer.Option(
+        1.0, "--poll-interval", help="Seconds between getUpdates batches."
+    ),
+) -> None:
+    """Run the Telegram relay sidecar: long-poll updates, record button taps.
+
+    Reads the token from ``AGENSUITE_TELEGRAM_TOKEN``. The bot never mutates
+    simulation state — it only appends validated taps to state/gate_inbox.json,
+    which ``human-gate --drain`` later applies under the state lock.
+    """
+    import os
+    import time
+
+    root = _root(ctx)
+    token = os.environ.get("AGENSUITE_TELEGRAM_TOKEN")
+    if not token:
+        raise _err("AGENSUITE_TELEGRAM_TOKEN is not set; cannot start bot")
+    mailbox = GateMailbox(root)
+    typer.echo("bot: polling Telegram (Ctrl-C to stop)", err=True)
+    while True:
+        try:
+            _bot_poll_once(root, token, mailbox)
+        except Exception as e:  # noqa: BLE001 — a relay must survive transient errors
+            typer.echo(f"bot: poll error: {e}", err=True)
+        if once:
+            return
+        time.sleep(poll_interval)
 
 
 # ---------------------------------------------------------------------------

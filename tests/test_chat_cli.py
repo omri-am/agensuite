@@ -70,3 +70,73 @@ def test_async_without_resolve_deadlocks_errors(cli, project_root):
     p = cli("human-gate", "--sprint", "s", "--async", expect_ok=False)
     assert p.returncode == 1
     assert "--async requires --resolve-deadlocks" in p.stderr
+
+
+def test_bot_poll_once_records_valid_tap(project_root, monkeypatch):
+    from agensuite import cli as cli_mod
+    from agensuite.gate_mailbox import GateMailbox, PendingGate, PendingPR
+
+    mb = GateMailbox(project_root)
+    mb.save_pending(PendingGate(sprint_id="s", prs=[PendingPR(pr_id="abc123", title="X")]))
+
+    updates = {
+        "ok": True,
+        "result": [
+            {
+                "update_id": 7,
+                "callback_query": {
+                    "id": "cb1",
+                    "data": "abc123:m",
+                    "message": {"chat": {"id": 42}},
+                },
+            }
+        ],
+    }
+    calls = []
+
+    def fake_call(token, method, payload):
+        calls.append((method, payload))
+        if method == "getUpdates":
+            return updates
+        return {"ok": True}
+
+    monkeypatch.setattr(cli_mod, "_telegram_call", fake_call)
+
+    new_offset = cli_mod._bot_poll_once(project_root, "tok", mb)
+
+    assert [(e.pr_id, e.choice) for e in mb.load_inbox()] == [("abc123", "m")]
+    assert new_offset == 8
+    assert mb.load_offset() == 8
+    assert any(m == "answerCallbackQuery" for (m, _) in calls)
+
+
+def test_bot_poll_once_ignores_illegal_tap(project_root, monkeypatch):
+    from agensuite import cli as cli_mod
+    from agensuite.gate_mailbox import GateMailbox, PendingGate, PendingPR
+
+    mb = GateMailbox(project_root)
+    mb.save_pending(PendingGate(sprint_id="s", prs=[PendingPR(pr_id="abc123", title="X")]))
+
+    updates = {
+        "ok": True,
+        "result": [
+            {
+                "update_id": 3,
+                "callback_query": {"id": "c", "data": "ghost:m",
+                                   "message": {"chat": {"id": 42}}},
+            },
+            {
+                "update_id": 4,
+                "callback_query": {"id": "c2", "data": "abc123:z",
+                                   "message": {"chat": {"id": 42}}},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        cli_mod, "_telegram_call",
+        lambda t, m, p: updates if m == "getUpdates" else {"ok": True},
+    )
+
+    cli_mod._bot_poll_once(project_root, "tok", mb)
+    assert mb.load_inbox() == []
+    assert mb.load_offset() == 5
