@@ -61,3 +61,23 @@ def test_remove_pending_pr(tmp_path: Path) -> None:
     mb.remove_pending_pr("a")
     loaded = mb.load_pending()
     assert [p.pr_id for p in loaded.prs] == ["b"]
+
+
+def test_load_pending_corrupt_raises(tmp_path: Path) -> None:
+    import pytest
+    from agensuite.gate_mailbox import GateMailbox
+    from agensuite.state import _state_dir
+    _state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    (_state_dir(tmp_path) / "gate_pending.json").write_text("{not json")
+    with pytest.raises(ValueError, match="corrupt gate_pending"):
+        GateMailbox(tmp_path).load_pending()
+
+
+def test_append_inbox_idempotent_path_and_remove_missing(tmp_path: Path) -> None:
+    from agensuite.gate_mailbox import GateMailbox, PendingGate, PendingPR
+    mb = GateMailbox(tmp_path)
+    # remove on absent pending file is a no-op (no raise)
+    mb.remove_pending_pr("ghost")
+    mb.save_pending(PendingGate(sprint_id="s", prs=[PendingPR(pr_id="a", title="A")]))
+    mb.remove_pending_pr("ghost")  # absent id, no-op
+    assert [p.pr_id for p in mb.load_pending().prs] == ["a"]

@@ -26,9 +26,9 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import _utcnow
-from .state import _atomic_write, _state_dir
+from .state import _atomic_write, _state_dir, state_lock
 
-LEGAL_CHOICES = ("m", "r", "a", "s")  # merge / reject / adr-options / skip
+LEGAL_CHOICES = ("m", "r", "a", "s")  # m=merge, r=reject, a=adr-options, s=skip
 
 
 class PendingPR(BaseModel):
@@ -77,7 +77,10 @@ class GateMailbox:
         path = self._pending_path()
         if not path.exists():
             return None
-        return PendingGate.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return PendingGate.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise ValueError(f"corrupt gate_pending at {path}: {e}") from e
 
     def remove_pending_pr(self, pr_id: str) -> None:
         pending = self.load_pending()
@@ -99,17 +102,22 @@ class GateMailbox:
         path = self._inbox_path()
         if not path.exists():
             return []
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return [InboxEntry.model_validate(e) for e in raw]
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return [InboxEntry.model_validate(e) for e in raw]
+        except Exception as e:
+            raise ValueError(f"corrupt gate_inbox at {path}: {e}") from e
 
     def append_inbox(self, pr_id: str, choice: str) -> None:
-        entries = self.load_inbox()
-        entries.append(InboxEntry(pr_id=pr_id, choice=choice))
-        _atomic_write(
-            self._inbox_path(),
-            json.dumps([json.loads(e.model_dump_json()) for e in entries], indent=2)
-            + "\n",
-        )
+        # Lock guards against drain clearing the inbox between our read and write.
+        with state_lock(self.root):
+            entries = self.load_inbox()
+            entries.append(InboxEntry(pr_id=pr_id, choice=choice))
+            _atomic_write(
+                self._inbox_path(),
+                json.dumps([e.model_dump(mode="json") for e in entries], indent=2)
+                + "\n",
+            )
 
     def clear_inbox(self) -> None:
         _atomic_write(self._inbox_path(), "[]\n")
@@ -119,7 +127,10 @@ class GateMailbox:
         path = self._offset_path()
         if not path.exists():
             return 0
-        return int(json.loads(path.read_text(encoding="utf-8")).get("offset", 0))
+        try:
+            return int(json.loads(path.read_text(encoding="utf-8")).get("offset", 0))
+        except Exception as e:
+            raise ValueError(f"corrupt bot_offset at {path}: {e}") from e
 
     def save_offset(self, offset: int) -> None:
         _atomic_write(
