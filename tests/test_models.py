@@ -231,7 +231,5 @@ def test_notify_config_defaults_and_validation():
     assert cfg.events == ["gate", "decision", "sprint-start"]
 
     # extra keys are rejected so a typo'd config fails loudly
-    import pydantic
-    import pytest
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(ValidationError):
         NotifyConfig(chat_id="1", bogus=True)
