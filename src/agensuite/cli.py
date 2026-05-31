@@ -1404,10 +1404,17 @@ def _drain_gate(
     """Apply human choices from the inbox to the gate's pending PRs.
 
     Applies each inbox entry via the SAME primitives as the stdin loop
-    (:func:`_merge_pr` / reject / adr-options / skip), then drops the PR from
-    pending. With ``--wait`` it re-reads the inbox on an interval until pending
-    is empty or ``timeout`` elapses. The poll is over the LOCAL inbox file, not
-    the network — the bot is the only process doing network I/O.
+    (:func:`_merge_pr` / reject / adr-options / skip). A PR is dropped from
+    pending only when it reaches a terminal outcome (merge / reject /
+    adr-options). A ``merge_failed`` (conflict or git error) or a ``skip``
+    ("come back later") leaves the PR in pending so it stays surfaced in
+    ``still_pending`` and remains re-actionable — matching the stdin loop,
+    which never silently removes a failed or skipped PR.
+
+    With ``--wait`` it re-reads the inbox on an interval until pending is empty
+    or ``timeout`` elapses, accumulating every iteration's resolutions into the
+    final JSON. The poll is over the LOCAL inbox file, not the network — the
+    bot is the only process doing network I/O.
     """
     import time
 
@@ -1415,6 +1422,9 @@ def _drain_gate(
     mb = GateMailbox(root)
     deadline = None  # set lazily; monotonic clock (Date.now-free)
     poll_interval = 2.0
+    # Accumulated across --wait iterations so the final JSON reports every PR
+    # resolved over the whole wait, not just the last poll's batch.
+    all_resolved: list[dict] = []
 
     while True:
         resolved: list[dict] = []
@@ -1423,7 +1433,9 @@ def _drain_gate(
                 prs = PRRegistry.load(root)
                 pending = mb.load_pending()
                 if pending is None:
-                    typer.echo(json.dumps({"resolved": [], "still_pending": []}))
+                    typer.echo(json.dumps(
+                        {"resolved": all_resolved, "still_pending": []}
+                    ))
                     return
                 pending_ids = {p.pr_id for p in pending.prs}
                 inbox = mb.load_inbox()
@@ -1434,17 +1446,21 @@ def _drain_gate(
                         try:
                             sha = _merge_pr(ctx, prs, entry.pr_id, force_deadlock=True)
                             resolved.append({"pr": entry.pr_id, "action": "merge", "sha": sha})
+                            pending_ids.discard(entry.pr_id)  # terminal
                         except typer.Exit:
+                            # conflict (→REJECTED) or git error (→still
+                            # DEADLOCKED): leave in pending, re-actionable.
                             resolved.append({"pr": entry.pr_id, "action": "merge_failed"})
                     elif entry.choice == "r":
                         prs[entry.pr_id].status = PRStatus.REJECTED
                         resolved.append({"pr": entry.pr_id, "action": "reject"})
+                        pending_ids.discard(entry.pr_id)  # terminal
                     elif entry.choice == "a":
                         prs[entry.pr_id].human_disposition = "adr_options"
                         resolved.append({"pr": entry.pr_id, "action": "adr_options"})
-                    else:  # "s"
+                        pending_ids.discard(entry.pr_id)  # terminal
+                    else:  # "s" — defer; leave the PR in pending for later
                         resolved.append({"pr": entry.pr_id, "action": "skip"})
-                    pending_ids.discard(entry.pr_id)
                 PRRegistry.save(root, prs)
                 mb.clear_inbox()
                 pending.prs = [p for p in pending.prs if p.pr_id in pending_ids]
@@ -1455,20 +1471,26 @@ def _drain_gate(
         except StateSchemaMismatch as e:
             raise _err(str(e)) from e
 
-        # emit per-PR outcomes to chat (outside the lock; never fatal)
+        all_resolved.extend(resolved)
+
+        # emit this batch's outcomes to chat (outside the lock; never fatal)
         notifier = load_notifier(root)
         for r in resolved:
             notifier.send("Gate", f"{r['pr']}: {r['action']}", event="gate")
 
         if not wait or not still_pending:
-            typer.echo(json.dumps({"resolved": resolved, "still_pending": still_pending}))
+            typer.echo(json.dumps(
+                {"resolved": all_resolved, "still_pending": still_pending}
+            ))
             return
 
         # --wait: sleep then loop. Use monotonic so we never read wall-clock.
         if deadline is None:
             deadline = time.monotonic() + timeout
         if time.monotonic() >= deadline:
-            typer.echo(json.dumps({"resolved": resolved, "still_pending": still_pending}))
+            typer.echo(json.dumps(
+                {"resolved": all_resolved, "still_pending": still_pending}
+            ))
             return
         time.sleep(poll_interval)
 

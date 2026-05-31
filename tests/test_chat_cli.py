@@ -232,3 +232,21 @@ def test_drain_reports_still_pending(cli, project_root):
     out = json.loads(p.stdout)
     assert out["resolved"] == []
     assert out["still_pending"] == [pr_a]
+
+
+def test_drain_skip_leaves_pr_pending_and_deadlocked(cli, project_root):
+    from agensuite.models import PRStatus
+    from agensuite.state import PRRegistry
+    from agensuite.gate_mailbox import GateMailbox
+
+    pr_a = _drive_to_deadlock(cli, project_root)
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")
+    GateMailbox(project_root).append_inbox(pr_id=pr_a, choice="s")  # "come back later"
+
+    p = cli("human-gate", "--sprint", "s", "--drain")
+    out = json.loads(p.stdout)
+    # the skip is acknowledged, but the PR stays pending + DEADLOCKED so the
+    # human can act on it again; a skipped PR is never silently dropped
+    assert {"pr": pr_a, "action": "skip"} in out["resolved"]
+    assert out["still_pending"] == [pr_a]
+    assert PRRegistry.load(project_root)[pr_a].status == PRStatus.DEADLOCKED
