@@ -40,6 +40,8 @@ from .models import (
     TurnPhase,
     Verdict,
 )
+from .gate_mailbox import GateMailbox, PendingGate, PendingPR
+from .notify import load_notifier
 from .sprint_loader import SprintParseError, list_sprints, load_sprint
 from .state import (
     DebateStore,
@@ -1191,6 +1193,23 @@ def human_gate(
         help="Iterate over DEADLOCKED PRs in --sprint and prompt the human "
              "to [m]erge / [r]eject / [a]dr-options / [s]kip each one.",
     ),
+    async_gate: bool = typer.Option(
+        False, "--async",
+        help="Chat mode: write the gate to state/ + send buttons, then return "
+             "immediately ({status: awaiting_human}) instead of blocking on stdin.",
+    ),
+    drain: bool = typer.Option(
+        False, "--drain",
+        help="Chat mode: apply human choices collected in state/gate_inbox.json.",
+    ),
+    wait: bool = typer.Option(
+        False, "--wait",
+        help="With --drain: block (polling the local inbox file) until every "
+             "pending PR is resolved or --timeout elapses.",
+    ),
+    timeout: float = typer.Option(
+        600.0, "--timeout", help="With --drain --wait: max seconds to wait."
+    ),
 ) -> None:
     """Default mode: print a banner and block on stdin until Enter.
 
@@ -1199,6 +1218,18 @@ def human_gate(
     follow-up, and applies the human's choice. This is the only path that
     can merge a PR whose status is DEADLOCKED.
     """
+    if drain:
+        if not sprint:
+            raise _err("--drain requires --sprint <id>")
+        _drain_gate(ctx, sprint, wait=wait, timeout=timeout)
+        return
+
+    if resolve_deadlocks and async_gate:
+        if not sprint:
+            raise _err("--resolve-deadlocks requires --sprint <id>")
+        _async_gate(ctx, sprint)
+        return
+
     if resolve_deadlocks:
         if not sprint:
             raise _err("--resolve-deadlocks requires --sprint <id>")
@@ -1325,6 +1356,44 @@ def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
         raise _err(str(e)) from e
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
+
+
+def _async_gate(ctx: typer.Context, sprint: str) -> None:
+    """Chat mode: persist the deadlocked PRs + send buttons, then return.
+
+    Unlike :func:`_resolve_deadlocks_loop` this never blocks on stdin; the
+    human answers from chat and the orchestrator later calls
+    ``human-gate --drain``.
+    """
+    root = _root(ctx)
+    try:
+        with state_lock(root):
+            prs = PRRegistry.load(root)
+            deadlocked = sorted(
+                [p for p in prs.values()
+                 if p.sprint_id == sprint and p.status == PRStatus.DEADLOCKED],
+                key=lambda p: p.created_at,
+            )
+            pending = PendingGate(
+                sprint_id=sprint,
+                prs=[PendingPR(pr_id=p.id, title=p.title) for p in deadlocked],
+            )
+            mb = GateMailbox(root)
+            mb.save_pending(pending)
+            mb.clear_inbox()
+        # send outside the lock — network must not hold the state mutex
+        load_notifier(root).send_gate(pending)
+        typer.echo(json.dumps(
+            {"status": "awaiting_human", "pending": [p.id for p in deadlocked]}
+        ))
+    except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
+
+
+def _drain_gate(ctx: typer.Context, sprint: str, *, wait: bool, timeout: float) -> None:
+    raise _err("--drain not yet implemented")  # replaced in Task 6
 
 
 # ---------------------------------------------------------------------------
