@@ -1407,7 +1407,7 @@ def _drain_gate(ctx: typer.Context, sprint: str, *, wait: bool, timeout: float) 
 # ---------------------------------------------------------------------------
 
 
-def _bot_poll_once(root: Path, token: str, mailbox: "GateMailbox") -> int:
+def _bot_poll_once(token: str, mailbox: "GateMailbox") -> int:
     """Process one ``getUpdates`` batch. Returns the next offset.
 
     Pure relay: validates each ``callback_query`` against gate_pending and
@@ -1416,8 +1416,11 @@ def _bot_poll_once(root: Path, token: str, mailbox: "GateMailbox") -> int:
     the bot.
     """
     offset = mailbox.load_offset()
+    # Long-poll hold must stay comfortably below the 30s socket timeout in
+    # ``notify._telegram_call`` or the socket trips before Telegram closes the
+    # poll cleanly. 20s leaves a 10s margin.
     resp = _telegram_call(
-        token, "getUpdates", {"offset": offset, "timeout": 25}
+        token, "getUpdates", {"offset": offset, "timeout": 20}
     )
     next_offset = offset
     for update in resp.get("result", []):
@@ -1429,10 +1432,14 @@ def _bot_poll_once(root: Path, token: str, mailbox: "GateMailbox") -> int:
         pr_id, _, choice = data.partition(":")
         if mailbox.is_legal(pr_id, choice):
             mailbox.append_inbox(pr_id=pr_id, choice=choice)
-        try:
-            _telegram_call(token, "answerCallbackQuery", {"callback_query_id": cq["id"]})
-        except Exception:  # noqa: BLE001
-            pass
+        # Acknowledge the tap so Telegram clears the client spinner. A missing
+        # id (malformed payload) must not drop the already-recorded tap.
+        cq_id = cq.get("id")
+        if cq_id:
+            try:
+                _telegram_call(token, "answerCallbackQuery", {"callback_query_id": cq_id})
+            except Exception:  # noqa: BLE001
+                pass
     mailbox.save_offset(next_offset)
     return next_offset
 
@@ -1464,7 +1471,7 @@ def bot(
     typer.echo("bot: polling Telegram (Ctrl-C to stop)", err=True)
     while True:
         try:
-            _bot_poll_once(root, token, mailbox)
+            _bot_poll_once(token, mailbox)
         except Exception as e:  # noqa: BLE001 — a relay must survive transient errors
             typer.echo(f"bot: poll error: {e}", err=True)
         if once:
