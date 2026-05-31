@@ -9,7 +9,7 @@ from agensuite import notify
 from agensuite.gate_mailbox import PendingGate, PendingPR
 
 
-def test_null_notifier_is_noop(tmp_path: Path) -> None:
+def test_null_notifier_is_noop() -> None:
     n = notify.NullNotifier()
     n.send("Title", "Body")
     n.send_gate(PendingGate(sprint_id="s", prs=[]))

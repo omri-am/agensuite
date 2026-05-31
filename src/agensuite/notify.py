@@ -18,6 +18,7 @@ templates, none of which are in scope here.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 from abc import ABC, abstractmethod
@@ -28,7 +29,7 @@ from .models import NotifyConfig
 
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
-_GATE_BUTTONS = (
+_GATE_BUTTONS: tuple[tuple[str, str], ...] = (
     ("Merge", "m"),
     ("Reject", "r"),
     ("ADR-options", "a"),
@@ -149,14 +150,15 @@ def load_notifier(root: Path) -> Notifier:
     Never raises on missing/invalid config — chat is strictly additive, so any
     problem degrades to "no chat, use the terminal".
     """
-    import os
-
     cfg_path = root / "state" / "notify.json"
     if not cfg_path.exists():
         return NullNotifier()
     try:
         cfg = NotifyConfig.model_validate_json(cfg_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # A malformed notify.json is almost certainly a user error; surface it
+        # on stderr (like the send paths) instead of failing silently.
+        print(f"notify: ignoring malformed {cfg_path}: {e}", file=sys.stderr)
         return NullNotifier()
 
     if cfg.channel == "telegram":
