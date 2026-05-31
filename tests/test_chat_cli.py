@@ -180,3 +180,55 @@ def test_bot_poll_once_records_tap_even_if_ack_fails(project_root, monkeypatch):
     # the ack failure is swallowed; the tap must still land in the inbox
     cli_mod._bot_poll_once("tok", mb)
     assert [(e.pr_id, e.choice) for e in mb.load_inbox()] == [("abc123", "r")]
+
+
+def test_drain_applies_merge_and_clears_pending(cli, project_root):
+    from agensuite.models import PRStatus
+    from agensuite.state import PRRegistry
+    from agensuite.gate_mailbox import GateMailbox
+
+    pr_a = _drive_to_deadlock(cli, project_root)
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")  # writes pending
+    GateMailbox(project_root).append_inbox(pr_id=pr_a, choice="m")  # simulate the tap
+
+    p = cli("human-gate", "--sprint", "s", "--drain")
+    out = json.loads(p.stdout)
+    assert {"pr": pr_a, "action": "merge"} in [
+        {"pr": r["pr"], "action": r["action"]} for r in out["resolved"]
+    ]
+    assert out["still_pending"] == []
+    assert PRRegistry.load(project_root)[pr_a].status == PRStatus.MERGED
+
+
+def test_drain_reject_marks_rejected(cli, project_root):
+    from agensuite.models import PRStatus
+    from agensuite.state import PRRegistry
+    from agensuite.gate_mailbox import GateMailbox
+
+    pr_a = _drive_to_deadlock(cli, project_root)
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")
+    GateMailbox(project_root).append_inbox(pr_id=pr_a, choice="r")
+
+    cli("human-gate", "--sprint", "s", "--drain")
+    assert PRRegistry.load(project_root)[pr_a].status == PRStatus.REJECTED
+
+
+def test_drain_adr_options_sets_disposition(cli, project_root):
+    from agensuite.state import PRRegistry
+    from agensuite.gate_mailbox import GateMailbox
+
+    pr_a = _drive_to_deadlock(cli, project_root)
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")
+    GateMailbox(project_root).append_inbox(pr_id=pr_a, choice="a")
+
+    cli("human-gate", "--sprint", "s", "--drain")
+    assert PRRegistry.load(project_root)[pr_a].human_disposition == "adr_options"
+
+
+def test_drain_reports_still_pending(cli, project_root):
+    pr_a = _drive_to_deadlock(cli, project_root)
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")
+    p = cli("human-gate", "--sprint", "s", "--drain")  # no tap arrived
+    out = json.loads(p.stdout)
+    assert out["resolved"] == []
+    assert out["still_pending"] == [pr_a]

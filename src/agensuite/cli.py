@@ -1398,8 +1398,79 @@ def _async_gate(ctx: typer.Context, sprint: str) -> None:
         raise _err(str(e)) from e
 
 
-def _drain_gate(ctx: typer.Context, sprint: str, *, wait: bool, timeout: float) -> None:
-    raise _err("--drain not yet implemented")  # replaced in Task 6
+def _drain_gate(
+    ctx: typer.Context, sprint: str, *, wait: bool, timeout: float
+) -> None:
+    """Apply human choices from the inbox to the gate's pending PRs.
+
+    Applies each inbox entry via the SAME primitives as the stdin loop
+    (:func:`_merge_pr` / reject / adr-options / skip), then drops the PR from
+    pending. With ``--wait`` it re-reads the inbox on an interval until pending
+    is empty or ``timeout`` elapses. The poll is over the LOCAL inbox file, not
+    the network — the bot is the only process doing network I/O.
+    """
+    import time
+
+    root = _root(ctx)
+    mb = GateMailbox(root)
+    deadline = None  # set lazily; monotonic clock (Date.now-free)
+    poll_interval = 2.0
+
+    while True:
+        resolved: list[dict] = []
+        try:
+            with state_lock(root):
+                prs = PRRegistry.load(root)
+                pending = mb.load_pending()
+                if pending is None:
+                    typer.echo(json.dumps({"resolved": [], "still_pending": []}))
+                    return
+                pending_ids = {p.pr_id for p in pending.prs}
+                inbox = mb.load_inbox()
+                for entry in inbox:
+                    if entry.pr_id not in pending_ids:
+                        continue  # tap for an already-resolved / unknown PR
+                    if entry.choice == "m":
+                        try:
+                            sha = _merge_pr(ctx, prs, entry.pr_id, force_deadlock=True)
+                            resolved.append({"pr": entry.pr_id, "action": "merge", "sha": sha})
+                        except typer.Exit:
+                            resolved.append({"pr": entry.pr_id, "action": "merge_failed"})
+                    elif entry.choice == "r":
+                        prs[entry.pr_id].status = PRStatus.REJECTED
+                        resolved.append({"pr": entry.pr_id, "action": "reject"})
+                    elif entry.choice == "a":
+                        prs[entry.pr_id].human_disposition = "adr_options"
+                        resolved.append({"pr": entry.pr_id, "action": "adr_options"})
+                    else:  # "s"
+                        resolved.append({"pr": entry.pr_id, "action": "skip"})
+                    pending_ids.discard(entry.pr_id)
+                PRRegistry.save(root, prs)
+                mb.clear_inbox()
+                pending.prs = [p for p in pending.prs if p.pr_id in pending_ids]
+                mb.save_pending(pending)
+                still_pending = [p.pr_id for p in pending.prs]
+        except StateLockTimeout as e:
+            raise _err(str(e)) from e
+        except StateSchemaMismatch as e:
+            raise _err(str(e)) from e
+
+        # emit per-PR outcomes to chat (outside the lock; never fatal)
+        notifier = load_notifier(root)
+        for r in resolved:
+            notifier.send("Gate", f"{r['pr']}: {r['action']}", event="gate")
+
+        if not wait or not still_pending:
+            typer.echo(json.dumps({"resolved": resolved, "still_pending": still_pending}))
+            return
+
+        # --wait: sleep then loop. Use monotonic so we never read wall-clock.
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        if time.monotonic() >= deadline:
+            typer.echo(json.dumps({"resolved": resolved, "still_pending": still_pending}))
+            return
+        time.sleep(poll_interval)
 
 
 # ---------------------------------------------------------------------------
