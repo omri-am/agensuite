@@ -269,8 +269,11 @@ def test_notify_sprint_start_sends(project_root, monkeypatch):
     monkeypatch.setenv("AGENSUITE_TELEGRAM_TOKEN", "tok")
 
     n = notify_mod.load_notifier(project_root)
-    n.send("Sprint start", "s — debate opening", event="sprint-start")
+    # body mirrors the format notify_sprint_start builds: "<id>: <title>\n..."
+    n.send("Sprint start", "s: Test sprint\nParticipants: a, b, c",
+           event="sprint-start")
     assert sent and "Sprint start" in sent[0]["text"]
+    assert "Participants: a, b, c" in sent[0]["text"]
 
 
 def test_notify_sprint_start_command_runs(cli, project_root):
