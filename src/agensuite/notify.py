@@ -85,12 +85,15 @@ class TelegramNotifier(Notifier):
     def send(self, title: str, body: str, *, event: str | None = None) -> None:
         if not self._enabled(event):
             return
-        text = f"*{title}*\n{body}"
+        # Plain text (no parse_mode) — titles/bodies carry PR and sprint names
+        # with arbitrary punctuation; Markdown parsing would 400 on a stray
+        # ``_``/``*``/`` ` `` and silently drop the notice. Matches send_gate.
+        text = f"{title}\n{body}"
         try:
             _telegram_call(
                 self.token,
                 "sendMessage",
-                {"chat_id": self.chat_id, "text": text, "parse_mode": "Markdown"},
+                {"chat_id": self.chat_id, "text": text},
             )
         except Exception as e:  # noqa: BLE001 — outbound failure must never break a sprint
             print(f"notify: telegram send failed: {e}", file=sys.stderr)

@@ -155,7 +155,12 @@ checks the event is in the config allow-list:
 - **Network failure on send:** `notify.send` swallows + logs to stderr; an
   outbound failure must never break a sprint. (A missed alert degrades to "use
   the terminal".)
-- **Bad/duplicate tap:** bot ignores silently (idempotent validation).
+- **Bad tap:** bot ignores silently (validates pr-id + choice against
+  pending). **Duplicate / conflicting taps:** the bot records every legal tap;
+  the drain applies them in arrival order and drops each PR from the pending
+  set once it reaches a terminal outcome, so the effective semantics are
+  **first-terminal-tap-wins** per PR (a later tap on an already-resolved PR is
+  skipped). The bot itself does not dedup.
 - **Unconfigured:** `NullNotifier` everywhere; no behavior change.
 - **`--drain --wait` timeout:** returns `still_pending` non-empty with a clear
   message; re-runnable (state persisted).
@@ -168,7 +173,8 @@ checks the event is in the config allow-list:
 - `TelegramNotifier` payload shape (URL, JSON body, inline_keyboard structure)
   with `urllib` mocked — no real network.
 - `WhatsAppNotifier` raises `NotImplementedError`.
-- Inbox validation: rejects unknown PR id / illegal choice / duplicate.
+- Inbox validation: rejects unknown PR id / illegal choice. Duplicate /
+  conflicting taps resolve first-terminal-tap-wins (see error-handling above).
 - `--drain` applies the **same** outcomes as the existing stdin loop (merge /
   reject / adr-options / skip) — assert PR registry parity against the current
   `_resolve_deadlocks_loop` behavior.
