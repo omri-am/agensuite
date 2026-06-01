@@ -72,12 +72,19 @@ uv tool install agensuite
 > install above is simpler because the workflow runs many `agensuite`
 > commands. Omitting `--idea` on a terminal launches the guided setup wizard.
 
-**2. Scaffold your project** (substitutes your idea into every template):
+**2. Scaffold your project** (substitutes your idea into every template).
+Pick a folder name that *doesn't exist yet* — `init` creates it for you.
+Don't `mkdir` it first; `init` refuses a non-empty folder.
 
 ```bash
 agensuite init my-startup        # guided setup wizard (idea, persona biases, sprint config)
 # non-interactive alternative:
 agensuite init my-startup --idea "A marketplace for renting camera gear between creators"
+```
+
+Then enter the folder `init` just created:
+
+```bash
 cd my-startup
 ```
 
