@@ -252,6 +252,87 @@ def test_drain_skip_leaves_pr_pending_and_deadlocked(cli, project_root):
     assert PRRegistry.load(project_root)[pr_a].status == PRStatus.DEADLOCKED
 
 
+def test_drain_conflict_rejected_dropped_from_pending(cli, project_root):
+    """Regression: a conflict-rejected PR must be removed from pending after
+    ``merge_failed``, not left looping forever in ``--drain --wait``.
+
+    Setup mirrors ``test_merge_conflict_exits_2`` in test_cli.py:
+    * Both PR_A and PR_B are opened from the SAME base commit on
+      ``shared.md`` (different content), so they diverge before any merge.
+    * PR_A is approved and merged first so ``main`` now has ``shared.md``.
+    * PR_B is then driven to DEADLOCKED.  When the human taps Merge ("m"),
+      ``_merge_pr`` raises ``MergeConflict`` → PR_B is set REJECTED.
+    * The fix: REJECTED status causes ``_drain_gate`` to drop it from pending;
+      ``still_pending`` must be empty and the PR must be REJECTED.
+    """
+    from agensuite.models import PRStatus
+    from agensuite.state import PRRegistry
+    from agensuite.gate_mailbox import GateMailbox
+
+    # ── 1. Bootstrap ─────────────────────────────────────────────────────────
+    cli("bootstrap")
+
+    # ── 2. Create BOTH branches from the same base (before any merge) ────────
+    # Both write shared.md with different content so they will conflict.
+    for role, br in [("a", "feat/a/conflict"), ("b", "feat/b/conflict")]:
+        cli("branch", "create", br)
+        slug = br.replace("/", "__")
+        f = project_root / "workspace" / "wt" / slug / "shared.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"value={role}\n")
+        cli("commit", "--branch", br, "--author", role,
+            "--message", f"{role} draft", "--files", "shared.md")
+
+    pr_a = cli("pr", "open", "--branch", "feat/a/conflict", "--author", "a",
+               "--title", "a: t", "--sprint", "s",
+               "--files", "shared.md").stdout.strip()
+    pr_b = cli("pr", "open", "--branch", "feat/b/conflict", "--author", "b",
+               "--title", "b: t", "--sprint", "s",
+               "--files", "shared.md").stdout.strip()
+
+    # ── 3. Approve and merge PR_A so main has shared.md="value=a\n" ──────────
+    cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+        "--comment", "lgtm", "--approve")
+    cli("pr", "merge", "--id", pr_a)
+
+    # ── 4. Drive PR_B to DEADLOCKED via debate votes ──────────────────────────
+    # PR_B already has one approval from "a" implied by the quorum path below;
+    # we replay the same debate sequence as _drive_to_deadlock.
+    cli("pr", "comment", "--id", pr_b, "--reviewer", "a",
+        "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+    cli("pr", "comment", "--id", pr_b, "--reviewer", "c",
+        "--comment", "blocker", "--verdict", "REQUEST_CHANGES", "--phase", "REVIEW")
+    cli("pr", "comment", "--id", pr_b, "--reviewer", "b",
+        "--comment", "see commit X", "--verdict", "COMMENT", "--phase", "REBUTTAL")
+    debate = json.loads(
+        (project_root / "state" / "debates" / "s.json").read_text()
+    )["debate"]
+    rebuttal_idx = next(
+        i for i, t in enumerate(debate["schedule"]) if t["phase"] == "REBUTTAL"
+    )
+    cli("pr", "comment", "--id", pr_b, "--reviewer", "c",
+        "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
+        "--phase", "FOLLOWUP", "--parent-turn-idx", str(rebuttal_idx))
+
+    # Confirm PR_B is indeed DEADLOCKED before we touch the gate.
+    assert PRRegistry.load(project_root)[pr_b].status == PRStatus.DEADLOCKED
+
+    # ── 5. Human gate writes pending; human taps Merge ───────────────────────
+    cli("human-gate", "--sprint", "s", "--resolve-deadlocks", "--async")
+    GateMailbox(project_root).append_inbox(pr_id=pr_b, choice="m")
+
+    # ── 6. Drain ──────────────────────────────────────────────────────────────
+    p = cli("human-gate", "--sprint", "s", "--drain")
+    out = json.loads(p.stdout)
+
+    # merge_failed must be in the resolved list
+    assert {"pr": pr_b, "action": "merge_failed"} in out["resolved"]
+    # conflict-rejected PR must be DROPPED from pending (not looping forever)
+    assert out["still_pending"] == []
+    # and the registry must reflect the terminal REJECTED status set by _merge_pr
+    assert PRRegistry.load(project_root)[pr_b].status == PRStatus.REJECTED
+
+
 def test_notify_sprint_start_sends(project_root, monkeypatch):
     # exercise the notifier wiring directly: configure telegram + capture the
     # outbound payload via the HTTP chokepoint (the subprocess `cli` fixture

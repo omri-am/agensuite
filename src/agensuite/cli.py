@@ -1408,10 +1408,11 @@ def _drain_gate(
     Applies each inbox entry via the SAME primitives as the stdin loop
     (:func:`_merge_pr` / reject / adr-options / skip). A PR is dropped from
     pending only when it reaches a terminal outcome (merge / reject /
-    adr-options). A ``merge_failed`` (conflict or git error) or a ``skip``
-    ("come back later") leaves the PR in pending so it stays surfaced in
-    ``still_pending`` and remains re-actionable — matching the stdin loop,
-    which never silently removes a failed or skipped PR.
+    adr-options). A merge conflict makes the PR terminal (→REJECTED) and also
+    drops it from pending; only a transient git error (PR stays DEADLOCKED) and
+    an explicit skip ("come back later") leave the PR in pending so it remains
+    re-actionable — matching the stdin loop, which never silently removes a
+    transiently-failed or skipped PR.
 
     With ``--wait`` it re-reads the inbox on an interval until pending is empty
     or ``timeout`` elapses, accumulating every iteration's resolutions into the
@@ -1450,9 +1451,13 @@ def _drain_gate(
                             resolved.append({"pr": entry.pr_id, "action": "merge", "sha": sha})
                             pending_ids.discard(entry.pr_id)  # terminal
                         except typer.Exit:
-                            # conflict (→REJECTED) or git error (→still
-                            # DEADLOCKED): leave in pending, re-actionable.
+                            # A merge conflict makes the PR terminal (REJECTED):
+                            # drop it from pending so it can't loop forever. A
+                            # transient git error leaves it DEADLOCKED — keep it
+                            # pending so the human can retry.
                             resolved.append({"pr": entry.pr_id, "action": "merge_failed"})
+                            if prs[entry.pr_id].status == PRStatus.REJECTED:
+                                pending_ids.discard(entry.pr_id)
                     elif entry.choice == "r":
                         prs[entry.pr_id].status = PRStatus.REJECTED
                         resolved.append({"pr": entry.pr_id, "action": "reject"})
