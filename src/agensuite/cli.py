@@ -1394,6 +1394,12 @@ def human_gate(
 ) -> None:
     """Default mode: print a banner and block on stdin until Enter.
 
+    When stdin is not a tty (the orchestrating agent runs this through a
+    subprocess), the command **fails closed**: it exits non-zero (code 2)
+    with an instruction to stop and bring the decision into the conversation,
+    rather than auto-continuing. This keeps the gate from becoming theatre
+    when no human is at the terminal.
+
     With ``--resolve-deadlocks --sprint <s>`` the command instead walks
     every DEADLOCKED PR in the sprint, shows the rebuttal + every "stand"
     follow-up, and applies the human's choice. This is the only path that
@@ -1412,13 +1418,26 @@ def human_gate(
     typer.echo(f"\n{bar}")
     typer.echo(f"  HUMAN GATE: {message}")
     typer.echo(f"{bar}")
-    try:
+    if sys.stdin.isatty():
         input("press Enter to continue: ")
-    except EOFError:
-        # Non-interactive caller (CI, scripted orchestrator): treat as
-        # immediate continuation. The banner is still printed so the log
-        # records the gate was passed through.
-        typer.echo("(no tty — auto-continuing)")
+        return
+
+    # No tty — the orchestrating agent is running this through a subprocess.
+    # Auto-continuing here would make the gate theatre: the banner prints,
+    # the agent proceeds to merge, and no human ever saw the decision. Instead
+    # fail closed with a non-zero exit and an explicit instruction. The agent
+    # sees the failed command, stops its turn, and brings the gate into the
+    # conversation with the human — resuming the merge only after a reply.
+    # Exit code 2 (distinct from the generic 1) marks "gate awaiting human",
+    # not "command broke", so the playbook can branch on it.
+    raise _err(
+        "HUMAN GATE — no tty, cannot block here. Orchestrator: STOP. Do NOT "
+        "run `pr merge` yet. Present this gate summary to the human in the "
+        "conversation and wait for their explicit go-ahead. Proceed with the "
+        "merges only after the human approves in-chat; treat their reply as "
+        "the gate clearance (do not re-run this command).",
+        code=2,
+    )
 
 
 def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
