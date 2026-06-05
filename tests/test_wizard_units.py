@@ -127,7 +127,9 @@ def test_init_applies_wizard_biases_and_sprint_config(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(cli.sys, "stdin", _Tty())
 
     target = tmp_path / "proj"
-    cli.init(target_dir=target, idea=None)
+    # Called as a plain function (not via Typer), so params Typer would inject
+    # must be passed explicitly — ``agent=None`` keeps the wizard path.
+    cli.init(target_dir=target, idea=None, agent=None)
 
     # Biases appended to the CTO persona, in order, and only there.
     cto = (target / ".claude" / "agents" / "cto.md").read_text()

@@ -102,6 +102,29 @@ That's it. Optionally tweak `.claude/agents/<role>.md` first, or use
 `agensuite chief customize <role> --focus "…"` to bias a persona without
 opening files.
 
+### Shortcut: one command that also opens your agent
+
+`--agent` collapses steps 2–4 into a single command. It scaffolds, runs
+`bootstrap`, then launches the named coding agent (`claude`, `codex`, or
+`cursor`) *inside* the new folder — you don't `cd` or open anything yourself:
+
+```bash
+agensuite init my-startup --agent claude
+```
+
+With no `--idea`, this is the zero-friction path: no setup questions, the
+template's idea placeholders are left intact, and the agent is told to **ask
+you for the idea first**, fill it in with one CLI call —
+
+```bash
+agensuite set-idea "A marketplace for renting camera gear between creators"
+```
+
+— and only then run sprint-1. Pass `--idea "…"` alongside `--agent` to bake the
+idea in up front and skip the question. If the agent's binary isn't on your
+`PATH`, the scaffold and bootstrap still succeed and the command prints the
+instruction for you to paste manually.
+
 ### What happens when you open it in the agent
 
 Following the `AGENTS.md` contract, the agent plays the **CEO** and:
