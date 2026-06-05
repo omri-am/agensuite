@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -361,6 +362,163 @@ class TestInit:
         assert meta["participants"] == ["cpo", "cto", "cdo", "cco"]
         # The misleading "customize files" line is gone.
         assert "customize AGENTS.md" not in p.stdout
+
+
+def _env_with_path(path_dirs: list[Path]) -> dict[str, str]:
+    """``_agensuite_env`` with PATH = ``path_dirs`` + git's own dir.
+
+    Binary resolution for the launched agent stays deterministic — point PATH
+    at a fake-agent dir to hit the exec path, or an empty dir to hit the
+    missing-binary fallback. git's directory is appended so the fast path's
+    bootstrap can still find ``git``; that dir is a system location and never
+    contains the real ``claude``/``codex``/``cursor``, so it can't shadow the
+    fake-agent decision. ``sys.executable`` is invoked by absolute path, so the
+    runner itself doesn't need PATH.
+    """
+    git = shutil.which("git")
+    assert git is not None, "git is required to run these tests"
+    env = _agensuite_env()
+    env["PATH"] = os.pathsep.join([*(str(d) for d in path_dirs), str(Path(git).parent)])
+    return env
+
+
+def _make_fake_agent(bindir: Path, name: str = "claude") -> Path:
+    """Create an executable that echoes its cwd + first arg, then return bindir.
+
+    ``init`` execs this in place of the real coding agent, so subprocess stdout
+    becomes the script's output — letting tests assert the chdir target and the
+    seed prompt that was passed.
+    """
+    bindir.mkdir(parents=True, exist_ok=True)
+    script = bindir / name
+    script.write_text('#!/bin/sh\necho "CWD=$(pwd)"\necho "PROMPT=$1"\n')
+    script.chmod(0o755)
+    return bindir
+
+
+class TestInitAgentFastPath:
+    """`agensuite init <name> --agent <x>` scaffolds, bootstraps, then launches."""
+
+    def test_deferred_idea_launches_with_placeholders_kept(self, tmp_path: Path) -> None:
+        """No --idea + --agent: placeholders survive, bootstrap runs, agent execs."""
+        bindir = _make_fake_agent(tmp_path / "fakebin")
+        env = _env_with_path([bindir])
+        p = _run(["init", "ftr", "--agent", "claude"], cwd=tmp_path, env=env)
+        assert p.returncode == 0, p.stderr
+
+        target = tmp_path / "ftr"
+        # Placeholders deferred to the agent, not substituted at init time.
+        sprint = (target / "sprints" / "sprint-1.md").read_text()
+        assert "{{CORE_PRODUCT_IDEA}}" in sprint
+        # Bootstrap ran as part of the fast path.
+        assert (target / "workspace").is_dir()
+        assert (target / "state").is_dir()
+        # The fake agent ran in the project dir with the deferred-idea prompt.
+        assert f"CWD={target}" in p.stdout
+        assert "PROMPT=" in p.stdout
+        assert "ask me for a one-line startup idea" in p.stdout
+        assert "set-idea" in p.stdout
+
+    def test_idea_and_agent_substitutes_and_uses_short_prompt(self, tmp_path: Path) -> None:
+        bindir = _make_fake_agent(tmp_path / "fakebin")
+        env = _env_with_path([bindir])
+        p = _run(
+            ["init", "ftr", "--idea", "Track insider trades", "--agent", "claude"],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert p.returncode == 0, p.stderr
+
+        target = tmp_path / "ftr"
+        sprint = (target / "sprints" / "sprint-1.md").read_text()
+        assert "{{CORE_PRODUCT_IDEA}}" not in sprint
+        assert "Track insider trades" in sprint
+        # Idea already set → short seed prompt, no set-idea instruction.
+        assert "Read AGENTS.md and execute sprint-1." in p.stdout
+        assert "set-idea" not in p.stdout
+
+    def test_cursor_resolves_secondary_binary(self, tmp_path: Path) -> None:
+        """`cursor` falls back to its second candidate when the first is absent."""
+        bindir = _make_fake_agent(tmp_path / "fakebin", name="cursor")
+        env = _env_with_path([bindir])
+        p = _run(["init", "ftr", "--agent", "cursor"], cwd=tmp_path, env=env)
+        assert p.returncode == 0, p.stderr
+        assert f"CWD={tmp_path / 'ftr'}" in p.stdout
+
+    def test_missing_binary_prints_paste_fallback(self, tmp_path: Path) -> None:
+        """Agent not on PATH: scaffold + bootstrap still succeed, exit 0."""
+        emptydir = tmp_path / "emptybin"
+        emptydir.mkdir()
+        env = _env_with_path([emptydir])
+        p = _run(["init", "ftr", "--agent", "claude"], cwd=tmp_path, env=env)
+        assert p.returncode == 0, p.stderr
+
+        target = tmp_path / "ftr"
+        assert (target / "workspace").is_dir()
+        assert "couldn't find 'claude'" in p.stderr
+        # Seed prompt is printed to stdout for the user to paste.
+        assert "ask me for a one-line startup idea" in p.stdout
+
+    def test_unknown_agent_rejected(self, tmp_path: Path) -> None:
+        env = _agensuite_env()
+        p = _run(["init", "ftr", "--agent", "emacs"], cwd=tmp_path, env=env)
+        assert p.returncode == 1
+        assert "unknown --agent" in p.stderr
+        # Nothing scaffolded on a rejected agent.
+        assert not (tmp_path / "ftr").exists()
+
+
+class TestSetIdea:
+    """`agensuite set-idea "<text>"` fills deferred placeholders."""
+
+    def _scaffold_with_placeholders(self, tmp_path: Path) -> Path:
+        """Scaffold a project that still carries idea placeholders.
+
+        Uses the deferred fast path with no agent binary on PATH, so the files
+        are written with placeholders intact and the process exits 0 without
+        launching anything.
+        """
+        emptydir = tmp_path / "emptybin"
+        emptydir.mkdir()
+        env = _env_with_path([emptydir])
+        p = _run(["init", "proj", "--agent", "claude"], cwd=tmp_path, env=env)
+        assert p.returncode == 0, p.stderr
+        return tmp_path / "proj"
+
+    def test_substitutes_across_all_file_groups(self, tmp_path: Path) -> None:
+        project = self._scaffold_with_placeholders(tmp_path)
+        env_with_root = _agensuite_env(extra_root=project)
+        idea = "A platform to track government officials' stock trades"
+        p = _run(["set-idea", idea], cwd=project, env=env_with_root)
+        assert p.returncode == 0, p.stderr
+
+        sprint = (project / "sprints" / "sprint-1.md").read_text()
+        assert "{{CORE_PRODUCT_IDEA}}" not in sprint
+        assert idea in sprint
+        for role in ("ceo", "cpo", "cto", "cdo", "cco"):
+            agent_md = (project / ".claude" / "agents" / f"{role}.md").read_text()
+            assert "{{COMPANY_MISSION}}" not in agent_md
+            assert idea in agent_md
+
+    def test_rerun_is_harmless_noop(self, tmp_path: Path) -> None:
+        project = self._scaffold_with_placeholders(tmp_path)
+        env_with_root = _agensuite_env(extra_root=project)
+        _run(["set-idea", "First idea"], cwd=project, env=env_with_root)
+        p = _run(["set-idea", "Second idea"], cwd=project, env=env_with_root)
+        # No placeholders remain → warns, exits 0, changes nothing.
+        assert p.returncode == 0, p.stderr
+        assert "no idea placeholders found" in p.stderr
+        assert "0 files updated" in p.stdout
+        # The first idea is still in place; the second did not overwrite it.
+        assert "First idea" in (project / "sprints" / "sprint-1.md").read_text()
+        assert "Second idea" not in (project / "sprints" / "sprint-1.md").read_text()
+
+    def test_empty_idea_rejected(self, tmp_path: Path) -> None:
+        project = self._scaffold_with_placeholders(tmp_path)
+        env_with_root = _agensuite_env(extra_root=project)
+        p = _run(["set-idea", "   "], cwd=project, env=env_with_root)
+        assert p.returncode == 1
+        assert "non-empty" in p.stderr
 
 
 class TestChiefCustomize:

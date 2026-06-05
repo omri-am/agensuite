@@ -71,6 +71,24 @@ agensuite bootstrap
 repository for the simulated product) and `state/` (JSON registries).
 Re-running it without `--reset` is a no-op.
 
+### 2a. Set the idea first if placeholders remain
+
+If you were launched via `agensuite init --agent <you>` **without** an
+`--idea`, this project still carries `{{CORE_PRODUCT_IDEA}}` /
+`{{COMPANY_MISSION}}` placeholders. Before the sprint loop:
+
+1. Ask the user for their startup idea in one line.
+2. Fill every template slot with **one** CLI call (this is a state
+   mutation — do not hand-edit the files):
+
+   ```
+   agensuite set-idea "<the user's idea>"
+   ```
+
+`set-idea` substitutes the tokens across `AGENTS.md`, `.claude/agents/*.md`,
+and `sprints/*.md`. It is a no-op if no placeholders remain, so it is safe to
+run defensively. Only proceed to the sprint loop once the idea is set.
+
 ## 3. Subagent Playbooks
 
 Native subagent files (project-level):

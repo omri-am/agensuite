@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from importlib import resources
@@ -108,6 +110,64 @@ app.add_typer(chief_app, name="chief")
 
 
 CHIEF_ROLES = ("ceo", "cpo", "cto", "cdo", "cco")
+
+# Coding agents the ``init --agent`` fast path can launch. Each maps to an
+# ordered list of binary candidates; the first one found on PATH wins. The
+# invocation is uniform — ``<binary> "<seed prompt>"`` — because all three
+# CLIs accept an initial instruction as a positional argument.
+AGENT_REGISTRY: dict[str, list[str]] = {
+    "claude": ["claude"],
+    "codex": ["codex"],
+    "cursor": ["cursor-agent", "cursor"],
+}
+
+
+def _resolve_agent_binary(agent: str) -> Optional[str]:
+    """Return the absolute path of the first available binary for ``agent``."""
+    for candidate in AGENT_REGISTRY[agent]:
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
+
+
+def _seed_prompt(*, idea_deferred: bool) -> str:
+    """Build the first instruction handed to the launched coding agent.
+
+    When the idea was deferred (``init --agent`` with no ``--idea``), the
+    prompt tells the agent to collect it and fill the template placeholders
+    via ``set-idea`` before running the sprint. When the idea was already
+    substituted at init time, the shorter form skips that step.
+    """
+    if idea_deferred:
+        return (
+            "Read AGENTS.md. First ask me for a one-line startup idea, then run "
+            '`agensuite set-idea "<idea>"`, then execute sprint-1.'
+        )
+    return "Read AGENTS.md and execute sprint-1."
+
+
+def _launch_agent(agent: str, target: Path, *, idea_deferred: bool) -> None:
+    """Chdir into ``target`` and replace this process with the coding agent.
+
+    ``os.execvp`` (rather than ``subprocess``) hands the terminal entirely to
+    the agent with no lingering Python parent. If the binary isn't on PATH the
+    scaffold + bootstrap have already succeeded, so we don't treat it as a
+    failure: print the seed prompt for the user to paste and exit 0.
+    """
+    prompt = _seed_prompt(idea_deferred=idea_deferred)
+    os.chdir(target)
+    binary = _resolve_agent_binary(agent)
+    if binary is None:
+        primary = AGENT_REGISTRY[agent][0]
+        typer.echo(
+            f"couldn't find {primary!r} on PATH — open this folder in your "
+            "coding agent and paste this instruction:",
+            err=True,
+        )
+        typer.echo(prompt)
+        raise typer.Exit(0)
+    os.execvp(binary, [binary, prompt])
 
 
 # ---------------------------------------------------------------------------
@@ -279,13 +339,32 @@ def init(
     idea: Optional[str] = typer.Option(
         None,
         "--idea",
-        help="Startup idea / company mission. If omitted on a TTY, the guided setup wizard launches; otherwise read from stdin.",
+        help="Startup idea / company mission. If omitted on a TTY, the guided setup wizard launches; otherwise read from stdin. Ignored prompting when --agent is set (the agent collects it).",
+    ),
+    agent: Optional[str] = typer.Option(
+        None,
+        "--agent",
+        help="claude | codex | cursor: after scaffolding, bootstrap and launch "
+             "this coding agent inside the new folder. With no --idea, the agent "
+             "collects it and fills placeholders via `agensuite set-idea`.",
     ),
 ) -> None:
     """Scaffold a clean project from packaged blueprints, with the user-provided
     startup idea substituted into the templated ``{{CORE_PRODUCT_IDEA}}`` and
     ``{{COMPANY_MISSION}}`` tokens.
+
+    With ``--agent``, the command also bootstraps the sandbox and replaces
+    itself with the named coding agent running inside the new folder. Omitting
+    ``--idea`` in that mode is the fast path: the wizard is skipped, defaults
+    are used, the idea placeholders are left intact, and the agent is told to
+    ask for the idea and run ``set-idea`` before the sprint loop.
     """
+    if agent is not None and agent not in AGENT_REGISTRY:
+        raise _err(
+            f"unknown --agent {agent!r} "
+            f"(expected one of: {', '.join(AGENT_REGISTRY)})"
+        )
+
     target = _resolve_target_dir(target_dir)
     if target.exists() and not target.is_dir():
         raise _err(f"target path exists and is not a directory: {target}")
@@ -296,13 +375,21 @@ def init(
     if not templates.is_dir():
         raise _err("packaged templates are missing; reinstall agensuite")
 
-    # Resolve answers. The interactive wizard runs ONLY when no --idea flag
-    # was given AND stdin is a real TTY. Otherwise we stay non-interactive:
-    # idea comes from the flag or a piped stdin line, everything else defaults.
+    # Resolve answers. Three paths:
+    #   * fast path (--agent, no --idea): defer the idea to the agent. No
+    #     wizard, defaults everywhere, placeholders kept (idea_deferred=True).
+    #   * interactive: no --idea on a TTY → guided wizard.
+    #   * non-interactive: --idea flag or a piped stdin line, everything else
+    #     defaults.
     from .wizard import default_answers, run_init_wizard
 
-    if idea is None and sys.stdin.isatty():
+    idea_deferred = idea is None and agent is not None
+    if idea_deferred:
+        answers = default_answers("")
+        subst_idea: Optional[str] = None
+    elif idea is None and sys.stdin.isatty():
         answers = run_init_wizard()
+        subst_idea = answers.idea
     else:
         if idea is None:
             idea = typer.prompt("Describe your startup idea")
@@ -310,21 +397,22 @@ def init(
         if not idea:
             raise _err("idea must be a non-empty string")
         answers = default_answers(idea)
+        subst_idea = answers.idea
 
     try:
         target.mkdir(parents=True, exist_ok=True)
         _copy_resource_tree(
-            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=answers.idea
+            templates.joinpath("AGENTS.md"), target / "AGENTS.md", idea=subst_idea
         )
         _copy_resource_tree(
             templates.joinpath(".claude", "agents"),
             target / ".claude" / "agents",
-            idea=answers.idea,
+            idea=subst_idea,
         )
         _copy_resource_tree(
             templates.joinpath("sprints", "sprint-1.md"),
             target / "sprints" / "sprint-1.md",
-            idea=answers.idea,
+            idea=subst_idea,
         )
 
         # Apply per-persona biases.
@@ -349,6 +437,16 @@ def init(
     except (OSError, ValueError) as e:
         raise _err(f"init failed: {e}") from e
 
+    # Fast path: bootstrap the sandbox and hand the terminal to the agent.
+    # _launch_agent does not return on success (it os.execvp's), so nothing
+    # below runs in that case.
+    if agent is not None:
+        typer.echo(f"Initialized agensuite project at {target}", err=True)
+        _do_bootstrap(target)
+        typer.echo(f"launching {agent} in {target} …", err=True)
+        _launch_agent(agent, target, idea_deferred=idea_deferred)
+        return
+
     typer.echo(f"Successfully initialized agensuite project at {target}")
     typer.echo("")
     typer.echo("Next steps:")
@@ -362,6 +460,19 @@ def init(
 # ---------------------------------------------------------------------------
 
 
+def _do_bootstrap(root: Path, *, reset: bool = False) -> None:
+    """Create ``workspace/`` (inner git repo) and ``state/`` under ``root``.
+
+    Shared by the ``bootstrap`` command and ``init``'s ``--agent`` fast path
+    so the two never drift. Idempotent; raises ``typer.Exit`` on git failure.
+    """
+    ensure_dirs(root)
+    try:
+        GitEngine(root).bootstrap(reset=reset)
+    except GitCommandError as e:
+        raise _err(f"bootstrap failed: {e}") from e
+
+
 @app.command()
 def bootstrap(
     ctx: typer.Context,
@@ -369,14 +480,73 @@ def bootstrap(
 ) -> None:
     """Initialize workspace/ (inner git repo) and state/ directories. Idempotent."""
     root = _root(ctx)
-    ensure_dirs(root)
-    try:
-        _engine(ctx).bootstrap(reset=reset)
-    except GitCommandError as e:
-        raise _err(f"bootstrap failed: {e}") from e
+    _do_bootstrap(root, reset=reset)
     _print_banner()
     typer.echo(f"workspace ready at {root / 'workspace'}")
     typer.echo(f"state ready at {root / 'state'}")
+
+
+# ---------------------------------------------------------------------------
+# set-idea
+# ---------------------------------------------------------------------------
+
+
+def _idea_token_targets(root: Path) -> list[Path]:
+    """Files that may carry idea placeholders, in a stable order.
+
+    ``AGENTS.md`` plus every persona under ``.claude/agents/`` and every
+    sprint under ``sprints/``. Only existing files are returned.
+    """
+    targets: list[Path] = []
+    agents_md = root / "AGENTS.md"
+    if agents_md.is_file():
+        targets.append(agents_md)
+    agents_dir = root / ".claude" / "agents"
+    if agents_dir.is_dir():
+        targets.extend(sorted(agents_dir.glob("*.md")))
+    sprints_dir = root / "sprints"
+    if sprints_dir.is_dir():
+        targets.extend(sorted(sprints_dir.glob("*.md")))
+    return targets
+
+
+@app.command("set-idea")
+def set_idea(
+    ctx: typer.Context,
+    idea: str = typer.Argument(..., help="Startup idea / company mission text."),
+) -> None:
+    """Fill the templated idea placeholders across a scaffolded project.
+
+    Substitutes ``{{CORE_PRODUCT_IDEA}}`` and ``{{COMPANY_MISSION}}`` in
+    ``AGENTS.md``, every ``.claude/agents/*.md``, and every ``sprints/*.md``.
+    Intended to be run by the coding agent after it collects the idea from the
+    user on the ``init --agent`` fast path, but works standalone too.
+
+    Re-running after the idea is already set finds no placeholders and is a
+    harmless no-op (warns, exits 0). An empty idea is an error.
+    """
+    text_idea = idea.strip()
+    if not text_idea:
+        raise _err("idea must be a non-empty string")
+
+    root = _root(ctx)
+    changed = 0
+    found_token = False
+    for path in _idea_token_targets(root):
+        original = path.read_text(encoding="utf-8")
+        if "{{CORE_PRODUCT_IDEA}}" in original or "{{COMPANY_MISSION}}" in original:
+            found_token = True
+        updated = _substitute_tokens(original, text_idea)
+        if updated != original:
+            path.write_text(updated, encoding="utf-8")
+            changed += 1
+
+    if not found_token:
+        typer.echo(
+            "no idea placeholders found (already set, or not an agensuite project root)",
+            err=True,
+        )
+    typer.echo(f"{changed} files updated")
 
 
 # ---------------------------------------------------------------------------
