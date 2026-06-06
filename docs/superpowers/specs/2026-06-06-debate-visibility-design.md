@@ -1,7 +1,10 @@
 # Debate Visibility — Decision Ledger Debriefs
 
 - **Date:** 2026-06-06
-- **Status:** Approved (pending implementation)
+- **Status:** Implemented 2026-06-06 — schema_version 2 → 3 (added `PullRequest.headline`,
+  `ReviewComment.counter`, `DebateState.last_emitted_round`). Digests emit to **stderr**
+  (stdout stays a clean machine channel) and append to `state/debate-log.md`. Pre-3 on-disk
+  state is rejected by `state.py`; regenerate via `agensuite bootstrap --reset`.
 - **Scope:** Visibility only. The worker/hire tier (letting chiefs summon
   implementation agents that write real product code) is a deliberately
   deferred follow-up spec, not in scope here.
