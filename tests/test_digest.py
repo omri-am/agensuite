@@ -91,3 +91,20 @@ def test_render_ledger_groups_locked_and_contested():
 def test_render_ledger_empty_is_total():
     out = digest.render_ledger([], quorum=1, round_label=None)
     assert "LOCKED" in out
+
+
+def test_colorize_noop_when_not_tty():
+    assert digest.colorize("🔴 hi", tty=False) == "🔴 hi"
+
+
+def test_colorize_wraps_when_tty_and_no_NO_COLOR(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = digest.colorize("🔴 hi", tty=True)
+    assert out.startswith("\x1b[")
+    assert out.endswith("\x1b[0m")
+    assert "🔴 hi" in out
+
+
+def test_colorize_respects_NO_COLOR(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert digest.colorize("🔴 hi", tty=True) == "🔴 hi"

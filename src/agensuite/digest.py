@@ -121,3 +121,26 @@ def render_ledger(
         r = right[i] if i < len(right) else ""
         lines.append(f"{l:<{_COL}}{r}".rstrip())
     return "\n".join(lines)
+
+
+# Verdict/status glyph → ANSI color. Applied line-wide based on the leading glyph.
+_ANSI = {
+    "🔴": "\x1b[31m", "❌": "\x1b[31m", "⚔️": "\x1b[31m",   # red: blocked/conflict
+    "🟢": "\x1b[32m", "✅": "\x1b[32m",                      # green: merged/approve
+    "🟡": "\x1b[33m", "👀": "\x1b[33m",                      # yellow: in-progress
+}
+
+
+def colorize(text: str, *, tty: bool) -> str:
+    """Wrap ``text`` in an ANSI color chosen by its leading glyph.
+
+    No-op unless ``tty`` is True and ``NO_COLOR`` is unset (the informal
+    https://no-color.org convention). Never called on text destined for the
+    log file, so escape codes never reach ``debate-log.md``.
+    """
+    if not tty or os.environ.get("NO_COLOR"):
+        return text
+    for glyph, code in _ANSI.items():
+        if text.lstrip().startswith(glyph):
+            return f"{code}{text}\x1b[0m"
+    return text
