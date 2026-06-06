@@ -428,3 +428,25 @@ class DebateState(BaseModel):
             schedule=schedule,
             cursor=0,
         )
+
+
+# ---------------------------------------------------------------------------
+# Notification / chat routing
+# ---------------------------------------------------------------------------
+
+
+class NotifyConfig(BaseModel):
+    """Opt-in chat configuration, persisted at ``state/notify.json``.
+
+    The bot *token* is never stored here — it comes from the
+    ``AGENSUITE_TELEGRAM_TOKEN`` environment variable only. This file holds
+    just the non-secret routing: which channel, which chat, which events.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: str = "telegram"
+    chat_id: str
+    events: list[str] = Field(
+        default_factory=lambda: ["gate", "decision", "sprint-start"]
+    )

@@ -55,6 +55,8 @@ You play the **CEO**. You will:
 | Sprint config (YAML frontmatter + body)  | `sprints/sprint-{n}.md`           | Both        |
 | Next-sprint authoring                    | CEO subagent post-ADR             | LLM only    |
 | Deadlock resolution                      | `agensuite human-gate --resolve-deadlocks` | Both |
+| Chat notifications (outbound)            | `agensuite notify` / `adr record` / `human-gate --async` | Both |
+| Chat-driven deadlock resolution          | `agensuite bot` + `human-gate --drain`    | Both |
 
 If you find yourself paraphrasing persona text, stop — spawn the
 subagent instead. If you find yourself touching `state/*.json` or
@@ -171,17 +173,29 @@ while True:
 if last_done.get("reason") == "deadlocked":
     agensuite human-gate --sprint {sprint_id} --resolve-deadlocks
 
-# --- human gate + product debrief ---
-# --sprint prints the decision ledger to the human's terminal at the gate.
-agensuite human-gate --message "Inspect debate for {sprint_id}" --sprint {sprint_id}
-# Spawn the CEO for a prose PRODUCT debrief, then persist it to the log:
+# --- human gate (STOP — this is a real pause, not a banner) ---
+# --sprint prints the decision ledger to the human at the gate (stderr).
+# With no tty (you run this through a subprocess) the command fails closed:
+# it exits non-zero (code 2) instead of auto-continuing. That non-zero exit
+# is the gate, not an error. When you see it: STOP your turn. Do NOT proceed
+# to `pr merge`. Surface the gate summary (sprint, the PRs about to merge,
+# key resolutions) to the human in the conversation and WAIT for their reply.
+# The human's in-chat go-ahead IS the clearance — do not re-run the command.
+exit_code = agensuite human-gate --message "Inspect debate for {sprint_id}" --sprint {sprint_id}
+if exit_code != 0:
+    # halt here; ask the human in the conversation; only continue below
+    # after they explicitly approve the merge in-chat
+    STOP_AND_ASK_HUMAN
+
+# After the human approves, spawn the CEO for a prose PRODUCT debrief and
+# persist it to state/debate-log.md alongside the deterministic ledger:
 spawn_subagent(subagent_type="ceo",
                prompt="Read the decision ledger + debate tail. Write a short "
                       "PRODUCT debrief: what locked, what was conceded and why, "
                       "and what stayed unresolved (and which sprint carries it).")
 agensuite debate digest --sprint {sprint_id} --note "<ceo prose>"
 
-# --- merge + ADR ---
+# --- merge + ADR (only after the human approved at the gate) ---
 for pr in agensuite pr list --sprint {sprint_id}:
     if pr meets quorum and has no open change requests:
         agensuite pr merge --id {pr.id}     # marks REJECTED on conflict
@@ -209,6 +223,79 @@ seeded at sprint kickoff and extended in place (append-only) as
 reviewers post `REQUEST_CHANGES` (which appends one REBUTTAL slot) or
 authors post a REBUTTAL (which appends one FOLLOWUP slot per open
 change-requester).
+
+### Chat integration (opt-in, Telegram-first)
+
+By default every `human-gate` call blocks on stdin and every `adr record`
+call is silent. An optional Telegram channel can replace the blocking prompt
+with async button taps and add outbound event notices. Nothing in this section
+is required — if unconfigured, the original terminal stdin behavior is
+completely unchanged.
+
+**Enabling.** Create `state/notify.json` (the `state/` directory is
+gitignored; never commit this file) and export `AGENSUITE_TELEGRAM_TOKEN`
+in the environment where the agent runs. The token must live only in the
+environment variable — never in a file:
+
+```json
+{
+  "channel": "telegram",
+  "chat_id": "<your-chat-id>",
+  "events": ["gate", "decision", "sprint-start"]
+}
+```
+
+If `state/notify.json` is absent, malformed, or `AGENSUITE_TELEGRAM_TOKEN`
+is unset, a `NullNotifier` is used and every send is a no-op. Call sites
+never branch on an "enabled" flag — the notifier seam handles degradation
+transparently.
+
+**Outbound events** (fired only when configured and the event name appears in
+`events`):
+
+- `agensuite notify sprint-start --sprint <s>` — call at the top of the loop
+  (just before spoke drafting) to announce the new sprint.
+- `agensuite adr record --sprint <s>` — after persisting the ADR also sends
+  the decision summary (event `"decision"`).
+- `agensuite human-gate --sprint <s> --resolve-deadlocks --async` — sends one
+  inline-keyboard message per deadlocked PR with Merge / Reject / ADR-options
+  / Skip buttons, then returns `{"status":"awaiting_human","pending":[...]}`.
+  This call does **not** block on stdin.
+
+**Inbound flow (chat-driven deadlock resolution).** Use this sequence when
+chat is configured and you want human decisions to arrive from the chat rather
+than the terminal:
+
+```
+# 1. Start the relay sidecar once; keep it running throughout the sprint.
+agensuite bot          # long-polls Telegram, appends button taps to
+                       # state/gate_inbox.json — never touches the PR registry.
+
+# 2. Raise the async gate (after the debate loop exits with reason="deadlocked").
+agensuite human-gate --sprint <s> --resolve-deadlocks --async
+#    → sends buttons to chat; returns immediately.
+
+# 3. Human taps buttons in Telegram.  The bot records each tap in the inbox.
+
+# 4. Apply taps and block until every pending PR is resolved.
+agensuite human-gate --sprint <s> --drain --wait
+#    → polls state/gate_inbox.json locally until all PRs resolve
+#      (or --timeout elapses).  A skipped or merge-failed PR remains in
+#      still_pending and is never silently dropped.
+
+# 5. Proceed to ADR as normal.
+agensuite adr record --sprint <s>
+```
+
+The bot is a **dumb relay** — it validates button taps against the pending
+gate and appends them to the inbox, but it never mutates the PR registry.
+All state mutations still flow through `--drain` under the state lock,
+preserving the same invariants as the stdin path.
+
+**Default (no chat).** When `state/notify.json` does not exist or
+`AGENSUITE_TELEGRAM_TOKEN` is unset, use `human-gate --resolve-deadlocks`
+(without `--async`) and `human-gate --message` as shown in the main sprint
+loop above. No code change is needed; the CLI degrades silently.
 
 ## 5. Native Subagent Spawning — Platform Hints
 
@@ -310,6 +397,10 @@ agensuite debate tail --sprint <s> [--window 6]
 agensuite debate digest --sprint <s> [--full] [--note <ceo prose>]  # ledger / CEO debrief
 agensuite human-gate --message <msg> [--sprint <s>]    # --sprint prints the ledger
 agensuite human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
+agensuite human-gate --sprint <s> --resolve-deadlocks --async  # chat: send buttons, return now
+agensuite human-gate --sprint <s> --drain [--wait]            # chat: apply button taps
+agensuite notify sprint-start --sprint <s>                     # chat: kickoff notice
+agensuite bot [--once]                                         # chat: Telegram relay sidecar
 agensuite adr record --sprint <s>
 ```
 

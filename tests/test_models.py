@@ -245,3 +245,16 @@ def test_debatestate_last_emitted_round_defaults_minus_one():
     from agensuite.models import DebateState
     ds = DebateState(sprint_id="s")
     assert ds.last_emitted_round == -1
+
+
+def test_notify_config_defaults_and_validation():
+    from agensuite.models import NotifyConfig
+
+    cfg = NotifyConfig(chat_id="123456")
+    assert cfg.channel == "telegram"
+    assert cfg.chat_id == "123456"
+    assert cfg.events == ["gate", "decision", "sprint-start"]
+
+    # extra keys are rejected so a typo'd config fails loudly
+    with pytest.raises(ValidationError):
+        NotifyConfig(chat_id="1", bogus=True)

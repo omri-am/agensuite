@@ -825,6 +825,22 @@ class TestHumanGateResolveDeadlocks:
         result = json.loads(p.stdout.strip().splitlines()[-1])
         assert result == {"resolved": [], "reason": "no_deadlocks"}
 
+    def test_default_mode_fails_closed_without_tty(self, cli) -> None:
+        """Default --message gate must NOT auto-continue under an agent.
+
+        The orchestrator runs this through a subprocess (no tty). If the
+        gate auto-continued it would be theatre — the banner prints and the
+        agent proceeds straight to merge. Instead it exits non-zero (code 2)
+        with a STOP instruction so the decision lands in the conversation.
+        """
+        p = cli("human-gate", "--message", "Inspect debate for s",
+                expect_ok=False)
+        assert p.returncode == 2, p.stderr
+        assert "STOP" in p.stderr
+        assert "HUMAN GATE" in p.stderr
+        # The banner still prints so the log records the gate was reached.
+        assert "Inspect debate for s" in p.stdout
+
 
 class TestReviewFindingsRegression:
     """Regression tests for the three bugs caught in the PR #3 review."""
@@ -1036,7 +1052,11 @@ class TestTerminalAndGateEmit:
 
     def test_human_gate_emits_ledger(self, cli, project_root):
         self._open_and_approve(cli, project_root)
-        p = cli("human-gate", "--message", "inspect", "--sprint", "s")
+        # No tty in the subprocess → the gate fails closed (exit 2). The ledger
+        # is emitted before that check, so it still lands on stderr.
+        p = cli("human-gate", "--message", "inspect", "--sprint", "s",
+                expect_ok=False)
+        assert p.returncode != 0
         assert "LOCKED" in p.stderr
 
     def test_next_turn_emits_round_ledger_on_first_turn(self, cli, project_root):

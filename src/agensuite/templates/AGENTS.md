@@ -189,17 +189,29 @@ while True:
 if last_done.get("reason") == "deadlocked":
     agensuite human-gate --sprint {sprint_id} --resolve-deadlocks
 
-# --- human gate + product debrief ---
-# --sprint prints the decision ledger to the human's terminal at the gate.
-agensuite human-gate --message "Inspect debate for {sprint_id}" --sprint {sprint_id}
-# Spawn the CEO for a prose PRODUCT debrief, then persist it to the log:
+# --- human gate (STOP — this is a real pause, not a banner) ---
+# --sprint prints the decision ledger to the human at the gate (stderr).
+# With no tty (you run this through a subprocess) the command fails closed:
+# it exits non-zero (code 2) instead of auto-continuing. That non-zero exit
+# is the gate, not an error. When you see it: STOP your turn. Do NOT proceed
+# to `pr merge`. Surface the gate summary (sprint, the PRs about to merge,
+# key resolutions) to the human in the conversation and WAIT for their reply.
+# The human's in-chat go-ahead IS the clearance — do not re-run the command.
+exit_code = agensuite human-gate --message "Inspect debate for {sprint_id}" --sprint {sprint_id}
+if exit_code != 0:
+    # halt here; ask the human in the conversation; only continue below
+    # after they explicitly approve the merge in-chat
+    STOP_AND_ASK_HUMAN
+
+# After the human approves, spawn the CEO for a prose PRODUCT debrief and
+# persist it to state/debate-log.md alongside the deterministic ledger:
 spawn_subagent(subagent_type="ceo",
                prompt="Read the decision ledger + debate tail. Write a short "
                       "PRODUCT debrief: what locked, what was conceded and why, "
                       "and what stayed unresolved (and which sprint carries it).")
 agensuite debate digest --sprint {sprint_id} --note "<ceo prose>"
 
-# --- merge + ADR ---
+# --- merge + ADR (only after the human approved at the gate) ---
 for pr in agensuite pr list --sprint {sprint_id}:
     if pr meets quorum and has no open change requests:
         agensuite pr merge --id {pr.id}     # marks REJECTED on conflict
