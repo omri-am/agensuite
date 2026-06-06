@@ -676,6 +676,8 @@ def pr_open(
     sprint: str = typer.Option(..., "--sprint"),
     files: list[str] = typer.Option([], "--files"),
     description: str = typer.Option("", "--description"),
+    headline: str = typer.Option("", "--headline",
+        help="One-line product claim this PR makes (feeds the decision ledger)."),
     base: str = typer.Option("main", "--base"),
 ) -> None:
     """Open a PR and refresh the sprint's debate schedule.
@@ -715,6 +717,7 @@ def pr_open(
                 base=base,
                 author=author,
                 description=description,
+                headline=headline,
                 files=list(files),
                 status=PRStatus.OPEN,
                 sprint_id=sprint,
@@ -803,6 +806,9 @@ def pr_comment(
         "--parent-turn-idx",
         help="Required for FOLLOWUP: index of the REBUTTAL slot being answered.",
     ),
+    counter: str = typer.Option("", "--counter",
+        help="One-line alternative you push (use with --verdict REQUEST_CHANGES); "
+             "feeds the contested column of the ledger."),
 ) -> None:
     """Append a review to a PR and a REVIEW message to the sprint transcript.
 
@@ -865,6 +871,7 @@ def pr_comment(
                 comment=comment,
                 verdict=verdict,
                 phase=phase,
+                counter=counter,
             )
             pr.reviews.append(review)
             _recompute_pr_status(pr)
@@ -908,6 +915,12 @@ def pr_comment(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    _emit_digest(
+        root,
+        _digest.render_verdict_line(
+            pr=pr, comment=review, round_idx=round_idx, quorum=cfg.approval_quorum
+        ),
+    )
     typer.echo(
         json.dumps(
             {

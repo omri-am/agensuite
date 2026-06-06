@@ -690,7 +690,9 @@ class TestDebateRebuttalLoop:
                   "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
                   "--phase", "FOLLOWUP",
                   "--parent-turn-idx", str(rebuttal_idx))
-        payload = json.loads(out.stdout)
+        # pr comment now emits a digest line before the machine-readable JSON;
+        # parse only the last line so the assertion is not affected.
+        payload = json.loads(out.stdout.strip().splitlines()[-1])
         assert payload["status"] == "DEADLOCKED"
 
         # pr merge refuses on the DEADLOCKED guard.
@@ -958,10 +960,43 @@ class TestReviewFindingsRegression:
         assert "DEADLOCKED" in ls
 
 
+class TestHeadlineCounter:
+    def test_pr_open_stores_headline(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+                 "--title", "T", "--sprint", "s",
+                 "--headline", "claim X", "--files", "doc.md").stdout.strip()
+        prs = json.loads((project_root / "state" / "prs.json").read_text())
+        assert prs["prs"][pr]["headline"] == "claim X"
+
+    def test_pr_comment_stores_counter_and_emits_verdict(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+                 "--title", "T", "--sprint", "s", "--headline", "claim X",
+                 "--files", "doc.md").stdout.strip()
+        cli("debate", "next-turn", "--sprint", "s")
+        p = cli("pr", "comment", "--id", pr, "--reviewer", "b",
+                "--comment", "no", "--verdict", "REQUEST_CHANGES",
+                "--counter", "alt Y")
+        prs = json.loads((project_root / "state" / "prs.json").read_text())
+        assert prs["prs"][pr]["reviews"][-1]["counter"] == "alt Y"
+        assert "🔴" in p.stdout
+        assert '"verdict": "REQUEST_CHANGES"' in p.stdout
+
+
 class TestDigestSink:
     def test_emit_writes_stdout_and_log_without_ansi(self, cli, project_root):
         cli("bootstrap")
         cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
         cli("commit", "--branch", "feat/a/x", "--author", "a",
             "--message", "draft", "--files", "doc.md")
         pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
