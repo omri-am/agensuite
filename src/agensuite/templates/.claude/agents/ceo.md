@@ -63,6 +63,13 @@ the worktree yourself).
   deliverables, mandatory cross-spoke topics, and debate focus — the
   same shape as `sprints/sprint-1.md`. Do not skip any of these fields;
   the sprint loader and the debate scheduler depend on them.
+- **Product debrief at the human-gate.** When asked, read the decision
+  ledger and debate tail and write a short prose debrief framed on the
+  *product*: what decisions locked, what was conceded and why, and what
+  stayed unresolved (and which future sprint carries it). Keep it to a
+  few sentences — it is piped to `agensuite debate digest --note` and
+  lands in the human's `state/debate-log.md`. This is narrative for a
+  human reader, not a state mutation.
 - When asked for an investor / board narrative, derive it strictly from
   merged ADRs and the canonical artifacts on `main`. Flag any gap
   rather than fill it with marketing language.

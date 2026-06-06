@@ -126,7 +126,8 @@ for role in cfg.participants:
     agensuite commit --branch {branch} --author {role} \
         --message "{role} draft for {sprint_id}" --files <paths>
     pr_id = agensuite pr open --branch {branch} --author {role} \
-        --title "{ROLE}: {cfg.title}" --files <paths> --sprint {sprint_id}
+        --title "{ROLE}: {cfg.title}" --headline "<one-line product claim>" \
+        --files <paths> --sprint {sprint_id}
 
 # --- debate (verdict-terminated; bounded threaded rebuttals) ---
 # Termination is verdict-based: the schedule is an UPPER BOUND. The debate
@@ -144,7 +145,9 @@ while True:
 
     if turn.phase == "REVIEW":
         prompt = (f"Review PR {turn.pr_id}. Recent debate: {tail}. "
-                  f"Verdict: APPROVE | REQUEST_CHANGES | COMMENT.")
+                  f"Verdict: APPROVE | REQUEST_CHANGES | COMMENT. If "
+                  f"REQUEST_CHANGES, state the one-line alternative you "
+                  f"propose (pass it as --counter).")
     elif turn.phase == "REBUTTAL":
         prompt = (f"You are the author of PR {turn.pr_id}. Address every "
                   f"change request collectively: {turn.open_change_requests}. "
@@ -162,14 +165,21 @@ while True:
         extra = ["--parent-turn-idx", str(turn.parent_turn_idx)]
     agensuite pr comment --id {turn.pr_id} --reviewer {turn.speaker} \
         --verdict <APPROVE|REQUEST_CHANGES|COMMENT> --phase {turn.phase} \
-        --comment "<critique>" [{extra}]
+        --comment "<critique>" [--counter "<one-line alternative>"] [{extra}]
 
 # --- deadlock resolution (only if any reviewer stood at FOLLOWUP) ---
 if last_done.get("reason") == "deadlocked":
     agensuite human-gate --sprint {sprint_id} --resolve-deadlocks
 
-# --- human gate (banner / pause) ---
-agensuite human-gate --message "Inspect debate for {sprint_id}"
+# --- human gate + product debrief ---
+# --sprint prints the decision ledger to the human's terminal at the gate.
+agensuite human-gate --message "Inspect debate for {sprint_id}" --sprint {sprint_id}
+# Spawn the CEO for a prose PRODUCT debrief, then persist it to the log:
+spawn_subagent(subagent_type="ceo",
+               prompt="Read the decision ledger + debate tail. Write a short "
+                      "PRODUCT debrief: what locked, what was conceded and why, "
+                      "and what stayed unresolved (and which sprint carries it).")
+agensuite debate digest --sprint {sprint_id} --note "<ceo prose>"
 
 # --- merge + ADR ---
 for pr in agensuite pr list --sprint {sprint_id}:
@@ -265,6 +275,15 @@ The CLI contract is canonical. Native subagent dispatch is platform-specific:
 - **CEO owns the roadmap, not the repo.** The next-sprint blueprint
   is authored by the CEO subagent only after the current sprint's ADR
   is recorded; no spoke writes `sprints/*.md`.
+- **Visibility is CLI-emitted, not LLM-narrated.** The decision ledger and
+  verdict/terminal lines are printed by the CLI (to **stderr**, leaving stdout
+  a clean machine channel) as a side effect of state mutations — `pr comment`,
+  `pr merge`, `debate next-turn` (round boundaries), and `human-gate` — and are
+  appended to `state/debate-log.md` for durable scrollback. The orchestrator
+  does not hand-roll status summaries. Spokes SHOULD pass `--headline` (on
+  `pr open`) and `--counter` (on a `REQUEST_CHANGES` `pr comment`) so the ledger
+  renders the product claim and its alternative; omitting them degrades the
+  cell, never breaks it.
 
 ## Reference: CLI Surface
 
@@ -275,10 +294,12 @@ agensuite sprint list
 agensuite branch create <name> [--base main]
 agensuite read --branch <b> --path <p>
 agensuite commit --branch <b> --author <a> --message <m> --files <f> [--files ...]
-agensuite pr open --branch <b> --author <a> --title <t> --sprint <s> [--files ...] [--description ...]
+agensuite pr open --branch <b> --author <a> --title <t> --sprint <s> \
+    [--headline <one-line product claim>] [--files ...] [--description ...]
 agensuite pr comment --id <pr> --reviewer <r> --comment <c> \
     [--verdict APPROVE|REQUEST_CHANGES|COMMENT] \
     [--phase REVIEW|REBUTTAL|FOLLOWUP] \
+    [--counter <one-line alternative>] # feeds the contested ledger column
     [--parent-turn-idx <n>]            # required for FOLLOWUP
     [--approve]                        # DEPRECATED — alias for --verdict APPROVE
     [--file <f>]
@@ -286,7 +307,8 @@ agensuite pr list [--sprint <s>]
 agensuite pr merge --id <pr>            # refuses DEADLOCKED + open change requests
 agensuite debate next-turn --sprint <s> # returns turn JSON with phase/prompt_hint
 agensuite debate tail --sprint <s> [--window 6]
-agensuite human-gate --message <msg>
+agensuite debate digest --sprint <s> [--full] [--note <ceo prose>]  # ledger / CEO debrief
+agensuite human-gate --message <msg> [--sprint <s>]    # --sprint prints the ledger
 agensuite human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
 agensuite adr record --sprint <s>
 ```
