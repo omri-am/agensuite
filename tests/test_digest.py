@@ -67,3 +67,27 @@ def test_render_pr_terminal_deadlocked():
     line = digest.render_pr_terminal(pr=pr, quorum=2)
     assert line.startswith("⚔️ pr-2 DEADLOCKED")
     assert "strict compliance posture" in line
+
+
+def test_render_ledger_groups_locked_and_contested():
+    merged = _pr(id="pr-1", headline="Postgres over Dynamo", status=PRStatus.MERGED)
+    contested = _pr(id="pr-2", headline="90-day flat TTL", status=PRStatus.CHANGES_REQUESTED)
+    contested.reviews.append(ReviewComment(
+        reviewer="cto", comment="breaks GDPR", verdict=Verdict.REQUEST_CHANGES,
+        counter="per-entity TTL policy",
+    ))
+    pending = _pr(id="pr-3", headline="three pricing tiers", status=PRStatus.OPEN)
+
+    out = digest.render_ledger([merged, contested, pending], quorum=2, round_label="ROUND 1")
+    assert "ROUND 1" in out
+    assert "LOCKED" in out and "CONTESTED" in out
+    assert "Postgres over Dynamo" in out
+    assert "90-day flat TTL" in out
+    assert "per-entity TTL policy" in out
+    assert "three pricing tiers" in out
+    assert "\x1b[" not in out
+
+
+def test_render_ledger_empty_is_total():
+    out = digest.render_ledger([], quorum=1, round_label=None)
+    assert "LOCKED" in out

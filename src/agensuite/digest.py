@@ -77,3 +77,47 @@ def render_pr_terminal(*, pr: PullRequest, quorum: int) -> str:
     elif pr.status == PRStatus.REJECTED:
         tail = pr.conflict_details or "rejected"
     return f"{glyph} {pr.id} {pr.status.value} {_claim(pr)}  {tail}"
+
+
+_COL = 36  # left-column width; cells are plain text so padding is width-safe
+
+
+def _locked_cells(prs: list[PullRequest]) -> list[str]:
+    return [f"• {_claim(pr)}" for pr in prs if pr.status == PRStatus.MERGED]
+
+
+def _contested_cells(prs: list[PullRequest], quorum: int) -> list[str]:
+    cells: list[str] = []
+    for pr in prs:
+        if pr.open_change_requests or pr.status == PRStatus.DEADLOCKED:
+            counters = [r.counter.strip() for r in pr.reviews
+                        if r.verdict == Verdict.REQUEST_CHANGES and r.counter.strip()]
+            opt_b = counters[-1] if counters else "change requested"
+            lean = "leaning B" if pr.approval_count < quorum else "leaning A"
+            cells.append(f"• {_claim(pr)}")
+            cells.append(f"    A: {_claim(pr)}  B: {opt_b}")
+            cells.append(f"    {lean} · open: {', '.join(pr.open_change_requests) or '—'}")
+        elif pr.status in (PRStatus.OPEN, PRStatus.UNDER_REVIEW):
+            cells.append(f"• {_claim(pr)} — unset")
+    return cells
+
+
+def render_ledger(
+    prs: list[PullRequest], *, quorum: int, round_label: str | None = None
+) -> str:
+    """Two-column decision ledger: LOCKED decisions vs CONTESTED tradeoffs.
+
+    Cells are plain text (no emoji inside columns) so fixed-width alignment is
+    stable across terminals; emoji live only in the section headers.
+    """
+    left = ["✅ LOCKED", "─" * 14, *_locked_cells(prs)]
+    right = ["❓ CONTESTED", "─" * 16, *_contested_cells(prs, quorum)]
+    rows = max(len(left), len(right))
+    lines: list[str] = []
+    if round_label:
+        lines.append(f"── {round_label} ──")
+    for i in range(rows):
+        l = left[i] if i < len(left) else ""
+        r = right[i] if i < len(right) else ""
+        lines.append(f"{l:<{_COL}}{r}".rstrip())
+    return "\n".join(lines)
