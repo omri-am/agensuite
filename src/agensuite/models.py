@@ -124,6 +124,7 @@ class ReviewComment(BaseModel):
     comment: str
     verdict: Verdict = Verdict.COMMENT
     phase: TurnPhase = TurnPhase.REVIEW
+    counter: str = ""
     timestamp: datetime = Field(default_factory=_utcnow)
 
     @model_validator(mode="before")
@@ -159,6 +160,7 @@ class PullRequest(BaseModel):
     base: str = "main"
     author: str
     description: str = ""
+    headline: str = ""
     files: list[str] = Field(default_factory=list)
     status: PRStatus = PRStatus.OPEN
     reviews: list[ReviewComment] = Field(default_factory=list)
@@ -365,6 +367,7 @@ class DebateState(BaseModel):
     pr_ids: list[str] = Field(default_factory=list)
     schedule: list[DebateTurn] = Field(default_factory=list)
     cursor: int = 0
+    last_emitted_round: int = -1
 
     @property
     def is_finished(self) -> bool:
