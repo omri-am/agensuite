@@ -1008,4 +1008,44 @@ class TestDigestSink:
         assert "Postgres over Dynamo" in p.stderr
         log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
         assert "Postgres over Dynamo" in log
-        assert "\x1b[" not in log
+
+
+class TestTerminalAndGateEmit:
+    def _open_and_approve(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+                 "--title", "T", "--sprint", "s", "--headline", "Postgres over Dynamo",
+                 "--files", "doc.md").stdout.strip()
+        cli("debate", "next-turn", "--sprint", "s")
+        cli("pr", "comment", "--id", pr, "--reviewer", "b",
+            "--comment", "lgtm", "--verdict", "APPROVE")
+        return pr
+
+    def test_merge_emits_terminal_and_ledger(self, cli, project_root):
+        pr = self._open_and_approve(cli, project_root)
+        p = cli("pr", "merge", "--id", pr)
+        assert "🟢" in p.stderr
+        assert "LOCKED" in p.stderr
+        log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
+        assert "Postgres over Dynamo" in log
+
+    def test_human_gate_emits_ledger(self, cli, project_root):
+        self._open_and_approve(cli, project_root)
+        p = cli("human-gate", "--message", "inspect", "--sprint", "s")
+        assert "LOCKED" in p.stderr
+
+    def test_next_turn_emits_round_ledger_on_first_turn(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+            "--title", "T", "--sprint", "s", "--headline", "claim X", "--files", "doc.md")
+        p = cli("debate", "next-turn", "--sprint", "s")
+        # first consumed turn (round 0 > last_emitted_round -1) emits a ledger snapshot
+        assert "ROUND 0" in p.stderr

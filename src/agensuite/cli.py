@@ -1165,6 +1165,15 @@ def pr_merge(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    # Successful merge only (a conflict raises typer.Exit inside the block).
+    cfg = _load_sprint_or_die(root, prs[id].sprint_id)
+    sprint_prs = sorted(
+        [p for p in prs.values() if p.sprint_id == prs[id].sprint_id],
+        key=lambda p: p.created_at,
+    )
+    _emit_digest(root, _digest.render_pr_terminal(pr=prs[id], quorum=cfg.approval_quorum))
+    _emit_digest(root, _digest.render_ledger(sprint_prs, quorum=cfg.approval_quorum))
+
     typer.echo(sha)
 
 
@@ -1262,6 +1271,7 @@ def debate_next_turn(
     a turn is "consumed" only after it has been durably persisted.
     """
     root = _root(ctx)
+    emit_ledger_for_round: Optional[str] = None
     try:
         with state_lock(root):
             cfg = _load_sprint_or_die(root, sprint)
@@ -1294,6 +1304,10 @@ def debate_next_turn(
                 turn = candidate
                 debate.advance()
                 break
+
+            if turn is not None and turn.round_idx > debate.last_emitted_round:
+                debate.last_emitted_round = turn.round_idx
+                emit_ledger_for_round = f"ROUND {turn.round_idx}"
 
             DebateStore.save(root, debate)
 
@@ -1337,6 +1351,14 @@ def debate_next_turn(
         raise _err(str(e)) from e
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
+
+    if emit_ledger_for_round is not None:
+        _emit_digest(
+            root,
+            _digest.render_ledger(
+                sprint_prs, quorum=cfg.approval_quorum, round_label=emit_ledger_for_round
+            ),
+        )
 
     target_pr = next(p for p in sprint_prs if p.id == turn.target_pr_id)
     result: dict = {
@@ -1434,6 +1456,7 @@ def human_gate(
     follow-up, and applies the human's choice. This is the only path that
     can merge a PR whose status is DEADLOCKED.
     """
+    root = _root(ctx)
     if resolve_deadlocks:
         if not sprint:
             raise _err("--resolve-deadlocks requires --sprint <id>")
@@ -1447,6 +1470,23 @@ def human_gate(
     typer.echo(f"\n{bar}")
     typer.echo(f"  HUMAN GATE: {message}")
     typer.echo(f"{bar}")
+
+    # Surface the decision ledger so the human sees the plan's standing before
+    # deciding. Best-effort: a missing/locked state never blocks the gate.
+    if sprint:
+        try:
+            with state_lock(root):
+                cfg = _load_sprint_or_die(root, sprint)
+                prs = PRRegistry.load(root)
+                sprint_prs = sorted(
+                    [p for p in prs.values() if p.sprint_id == sprint],
+                    key=lambda p: p.created_at,
+                )
+            _emit_digest(root, _digest.render_ledger(
+                sprint_prs, quorum=cfg.approval_quorum, round_label="HUMAN GATE"))
+        except (StateLockTimeout, StateSchemaMismatch):
+            pass
+
     try:
         input("press Enter to continue: ")
     except EOFError:
