@@ -1,4 +1,5 @@
 from agensuite import digest
+from agensuite.models import PRStatus, PullRequest, ReviewComment, Verdict
 
 
 def test_meter_filled_and_empty():
@@ -19,9 +20,6 @@ def test_truncate_long_adds_ellipsis():
     out = digest.truncate("x" * 100, 10)
     assert out == "x" * 9 + "…"
     assert len(out) == 10
-
-
-from agensuite.models import PRStatus, PullRequest, ReviewComment, Verdict, TurnPhase
 
 
 def _pr(**kw):
@@ -108,3 +106,17 @@ def test_colorize_wraps_when_tty_and_no_NO_COLOR(monkeypatch):
 def test_colorize_respects_NO_COLOR(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     assert digest.colorize("🔴 hi", tty=True) == "🔴 hi"
+
+
+def test_colorize_handles_multicodepoint_deadlock_glyph(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    out = digest.colorize("⚔️ pr-1 DEADLOCKED foo", tty=True)
+    assert out.startswith("\x1b[31m")
+    assert out.endswith("\x1b[0m")
+
+
+def test_render_ledger_shows_rejected():
+    rejected = _pr(id="pr-9", headline="risky migration", status=PRStatus.REJECTED)
+    out = digest.render_ledger([rejected], quorum=1, round_label=None)
+    assert "risky migration" in out
+    assert "rejected" in out

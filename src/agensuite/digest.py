@@ -97,6 +97,8 @@ def _contested_cells(prs: list[PullRequest], quorum: int) -> list[str]:
             cells.append(f"• {_claim(pr)}")
             cells.append(f"    A: {_claim(pr)}  B: {opt_b}")
             cells.append(f"    {lean} · open: {', '.join(pr.open_change_requests) or '—'}")
+        elif pr.status == PRStatus.REJECTED:
+            cells.append(f"• {_claim(pr)} — rejected")
         elif pr.status in (PRStatus.OPEN, PRStatus.UNDER_REVIEW):
             cells.append(f"• {_claim(pr)} — unset")
     return cells
@@ -107,8 +109,10 @@ def render_ledger(
 ) -> str:
     """Two-column decision ledger: LOCKED decisions vs CONTESTED tradeoffs.
 
-    Cells are plain text (no emoji inside columns) so fixed-width alignment is
-    stable across terminals; emoji live only in the section headers.
+    Data cells are plain text so fixed-width padding is width-safe across
+    terminals. Only the two section headers (✅ LOCKED / ❓ CONTESTED) carry
+    emoji, and those sit on their own header rows so they never disrupt
+    data-cell alignment.
     """
     left = ["✅ LOCKED", "─" * 14, *_locked_cells(prs)]
     right = ["❓ CONTESTED", "─" * 16, *_contested_cells(prs, quorum)]
