@@ -30,6 +30,7 @@ from typing import Optional
 import typer
 import yaml
 
+from . import digest as _digest
 from .git_engine import GitCommandError, GitEngine, MergeConflict
 from .models import (
     DebateState,
@@ -276,6 +277,27 @@ def _short_id(*parts: str) -> str:
     """
     h = hashlib.sha1("\x00".join(parts).encode("utf-8")).hexdigest()
     return h[:6]
+
+
+def _debate_log_path(root: Path) -> Path:
+    return root / "state" / "debate-log.md"
+
+
+def _emit_digest(root: Path, text: str) -> None:
+    """Print ``text`` to stdout (ANSI on a TTY) and append the plain form to
+    ``state/debate-log.md``. Append failure warns to stderr but never aborts
+    the caller — the state write is the source of truth.
+    """
+    tty = sys.stdout.isatty()
+    for line in text.splitlines() or [text]:
+        typer.echo(_digest.colorize(line, tty=tty))
+    path = _debate_log_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n")
+    except OSError as e:
+        typer.echo(f"warning: could not append to {path}: {e}", err=True)
 
 
 def _load_sprint_or_die(root: Path, sprint_id: str) -> SprintConfig:

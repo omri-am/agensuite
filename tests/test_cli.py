@@ -956,3 +956,23 @@ class TestReviewFindingsRegression:
         # And the PR is now visible to the human-gate deadlock loop.
         ls = cli("pr", "list", "--sprint", "s").stdout
         assert "DEADLOCKED" in ls
+
+
+class TestDigestSink:
+    def test_emit_writes_stdout_and_log_without_ansi(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "draft", "--files", "doc.md")
+        pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+                 "--title", "T", "--sprint", "s",
+                 "--headline", "Postgres over Dynamo", "--files", "doc.md").stdout.strip()
+        cli("debate", "next-turn", "--sprint", "s")
+        p = cli("pr", "comment", "--id", pr, "--reviewer", "b",
+                "--comment", "looks risky", "--verdict", "REQUEST_CHANGES",
+                "--counter", "per-entity policy")
+        assert "🔴" in p.stdout
+        assert "Postgres over Dynamo" in p.stdout
+        log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
+        assert "Postgres over Dynamo" in log
+        assert "\x1b[" not in log
