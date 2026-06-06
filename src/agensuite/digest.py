@@ -42,3 +42,38 @@ def truncate(text: str, limit: int = 80) -> str:
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1] + "…"
+
+
+def _claim(pr: PullRequest) -> str:
+    """The PR's product claim, falling back to its title."""
+    return pr.headline.strip() or pr.title.strip()
+
+
+def render_verdict_line(
+    *, pr: PullRequest, comment: ReviewComment, round_idx: int, quorum: int
+) -> str:
+    """One-line VERDICT digest. Kept short so per-turn scrollback stays readable."""
+    glyph = VERDICT_GLYPH.get(comment.verdict, "💬")
+    crit = truncate(comment.comment, 70)
+    m = meter(len(pr.reviews), quorum)
+    parts = [
+        f'{glyph} r{round_idx} · {comment.reviewer} → {pr.id} ({_claim(pr)})',
+        f'"{crit}"',
+        m,
+    ]
+    open_reqs = pr.open_change_requests
+    if open_reqs:
+        parts.append(f"· open: {', '.join(open_reqs)}")
+    return "  ".join(parts)
+
+
+def render_pr_terminal(*, pr: PullRequest, quorum: int) -> str:
+    """One-line PR_TERMINAL digest for a resolved PR."""
+    glyph = STATUS_GLYPH.get(pr.status, "•")
+    m = meter(pr.approval_count, quorum)
+    tail = f"{m} {pr.approval_count}/{quorum}"
+    if pr.status == PRStatus.DEADLOCKED:
+        tail = "stood at FOLLOWUP"
+    elif pr.status == PRStatus.REJECTED:
+        tail = pr.conflict_details or "rejected"
+    return f"{glyph} {pr.id} {pr.status.value} {_claim(pr)}  {tail}"

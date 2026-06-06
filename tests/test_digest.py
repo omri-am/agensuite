@@ -19,3 +19,51 @@ def test_truncate_long_adds_ellipsis():
     out = digest.truncate("x" * 100, 10)
     assert out == "x" * 9 + "…"
     assert len(out) == 10
+
+
+from agensuite.models import PRStatus, PullRequest, ReviewComment, Verdict, TurnPhase
+
+
+def _pr(**kw):
+    base = dict(id="pr-2", title="data model", branch="b", author="cdo", sprint_id="s")
+    base.update(kw)
+    return PullRequest(**base)
+
+
+def test_render_verdict_line_request_changes():
+    pr = _pr(headline="90-day flat TTL")
+    pr.reviews.append(ReviewComment(
+        reviewer="cto", comment="90-day TTL breaks GDPR minimization",
+        verdict=Verdict.REQUEST_CHANGES, counter="per-entity TTL policy",
+    ))
+    line = digest.render_verdict_line(pr=pr, comment=pr.reviews[-1], round_idx=1, quorum=2)
+    assert line.startswith("🔴 r1 · cto → pr-2")
+    assert "90-day flat TTL" in line
+    assert "GDPR minimization" in line
+    assert "●○" in line
+    assert "open: cto" in line
+
+
+def test_render_verdict_line_falls_back_to_title_without_headline():
+    pr = _pr(headline="")
+    pr.reviews.append(ReviewComment(reviewer="cto", comment="ok", verdict=Verdict.APPROVE))
+    line = digest.render_verdict_line(pr=pr, comment=pr.reviews[-1], round_idx=0, quorum=1)
+    assert "data model" in line
+    assert line.startswith("✅ r0 · cto → pr-2")
+
+
+def test_render_pr_terminal_merged():
+    pr = _pr(headline="Postgres over Dynamo", status=PRStatus.MERGED)
+    pr.reviews.append(ReviewComment(reviewer="cto", comment="lgtm", verdict=Verdict.APPROVE))
+    pr.reviews.append(ReviewComment(reviewer="cco", comment="lgtm", verdict=Verdict.APPROVE))
+    line = digest.render_pr_terminal(pr=pr, quorum=2)
+    assert line.startswith("🟢 pr-2 MERGED")
+    assert "Postgres over Dynamo" in line
+    assert "●● 2/2" in line
+
+
+def test_render_pr_terminal_deadlocked():
+    pr = _pr(headline="strict compliance posture", status=PRStatus.DEADLOCKED)
+    line = digest.render_pr_terminal(pr=pr, quorum=2)
+    assert line.startswith("⚔️ pr-2 DEADLOCKED")
+    assert "strict compliance posture" in line
