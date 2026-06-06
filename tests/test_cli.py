@@ -1049,3 +1049,24 @@ class TestTerminalAndGateEmit:
         p = cli("debate", "next-turn", "--sprint", "s")
         # first consumed turn (round 0 > last_emitted_round -1) emits a ledger snapshot
         assert "ROUND 0" in p.stderr
+
+
+class TestDebateDigestCommand:
+    def test_digest_renders_ledger_on_demand(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+            "--title", "T", "--sprint", "s", "--headline", "claim X", "--files", "doc.md")
+        p = cli("debate", "digest", "--sprint", "s")
+        assert "LOCKED" in p.stderr
+
+    def test_digest_note_appends_narrative(self, cli, project_root):
+        cli("bootstrap")
+        cli("debate", "digest", "--sprint", "s", "--note",
+            "This sprint locked the data layer on Postgres.")
+        log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
+        assert "locked the data layer on Postgres" in log
+        assert "CEO DEBRIEF" in log

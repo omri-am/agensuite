@@ -1432,6 +1432,52 @@ def debate_tail(
     )
 
 
+@debate_app.command("digest")
+def debate_digest(
+    ctx: typer.Context,
+    sprint: str = typer.Option(..., "--sprint"),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Render the full ledger (default behaviour; reserved for future detail).",
+    ),
+    note: Optional[str] = typer.Option(
+        None,
+        "--note",
+        help="Append a CEO prose product debrief to stderr + the log.",
+    ),
+) -> None:
+    """Render the decision ledger on demand, and/or append a CEO narrative note.
+
+    The orchestrator calls this at a human-gate after spawning the CEO
+    subagent: it pipes the CEO's prose product debrief in via ``--note`` so it
+    lands in ``state/debate-log.md`` alongside the deterministic ledger.
+    """
+    root = _root(ctx)
+    try:
+        with state_lock(root):
+            cfg = _load_sprint_or_die(root, sprint)
+            prs = PRRegistry.load(root)
+            sprint_prs = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint],
+                key=lambda p: p.created_at,
+            )
+    except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
+
+    if note is not None:
+        _emit_digest(root, f"📣 CEO DEBRIEF — {sprint}\n{note.strip()}")
+    else:
+        _emit_digest(
+            root,
+            _digest.render_ledger(
+                sprint_prs, quorum=cfg.approval_quorum, round_label="DIGEST"
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # human-gate
 # ---------------------------------------------------------------------------
