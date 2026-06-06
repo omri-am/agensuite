@@ -284,13 +284,13 @@ def _debate_log_path(root: Path) -> Path:
 
 
 def _emit_digest(root: Path, text: str) -> None:
-    """Print ``text`` to stdout (ANSI on a TTY) and append the plain form to
+    """Print ``text`` to stderr (ANSI on a TTY) and append the plain form to
     ``state/debate-log.md``. Append failure warns to stderr but never aborts
     the caller — the state write is the source of truth.
     """
-    tty = sys.stdout.isatty()
+    tty = sys.stderr.isatty()
     for line in text.splitlines() or [text]:
-        typer.echo(_digest.colorize(line, tty=tty))
+        typer.echo(_digest.colorize(line, tty=tty), err=True)
     path = _debate_log_path(root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -690,9 +690,7 @@ class TestDebateRebuttalLoop:
                   "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
                   "--phase", "FOLLOWUP",
                   "--parent-turn-idx", str(rebuttal_idx))
-        # pr comment now emits a digest line before the machine-readable JSON;
-        # parse only the last line so the assertion is not affected.
-        payload = json.loads(out.stdout.strip().splitlines()[-1])
+        payload = json.loads(out.stdout)
         assert payload["status"] == "DEADLOCKED"
 
         # pr merge refuses on the DEADLOCKED guard.
@@ -988,7 +986,7 @@ class TestHeadlineCounter:
                 "--counter", "alt Y")
         prs = json.loads((project_root / "state" / "prs.json").read_text())
         assert prs["prs"][pr]["reviews"][-1]["counter"] == "alt Y"
-        assert "🔴" in p.stdout
+        assert "🔴" in p.stderr
         assert '"verdict": "REQUEST_CHANGES"' in p.stdout
 
 
@@ -1006,8 +1004,8 @@ class TestDigestSink:
         p = cli("pr", "comment", "--id", pr, "--reviewer", "b",
                 "--comment", "looks risky", "--verdict", "REQUEST_CHANGES",
                 "--counter", "per-entity policy")
-        assert "🔴" in p.stdout
-        assert "Postgres over Dynamo" in p.stdout
+        assert "🔴" in p.stderr
+        assert "Postgres over Dynamo" in p.stderr
         log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
         assert "Postgres over Dynamo" in log
         assert "\x1b[" not in log
