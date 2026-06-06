@@ -1439,7 +1439,7 @@ def debate_digest(
     full: bool = typer.Option(
         False,
         "--full",
-        help="Render the full ledger (default behaviour; reserved for future detail).",
+        help="Also emit a per-PR status line under the ledger.",
     ),
     note: Optional[str] = typer.Option(
         None,
@@ -1454,6 +1454,12 @@ def debate_digest(
     lands in ``state/debate-log.md`` alongside the deterministic ledger.
     """
     root = _root(ctx)
+
+    # The note carries its own text — no state read needed, so skip the lock.
+    if note is not None:
+        _emit_digest(root, f"📣 CEO DEBRIEF — {sprint}\n{note.strip()}")
+        return
+
     try:
         with state_lock(root):
             cfg = _load_sprint_or_die(root, sprint)
@@ -1467,15 +1473,17 @@ def debate_digest(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
-    if note is not None:
-        _emit_digest(root, f"📣 CEO DEBRIEF — {sprint}\n{note.strip()}")
-    else:
-        _emit_digest(
-            root,
-            _digest.render_ledger(
-                sprint_prs, quorum=cfg.approval_quorum, round_label="DIGEST"
-            ),
-        )
+    _emit_digest(
+        root,
+        _digest.render_ledger(
+            sprint_prs, quorum=cfg.approval_quorum, round_label="DIGEST"
+        ),
+    )
+    if full:
+        for pr in sprint_prs:
+            _emit_digest(
+                root, _digest.render_pr_terminal(pr=pr, quorum=cfg.approval_quorum)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1641,6 +1649,30 @@ def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
                     resolutions.append({"pr": pr.id, "action": "skip"})
 
             PRRegistry.save(root, prs)
+
+            # Emit a terminal line per resolved PR + a closing ledger so the
+            # human-gate's primary resolution moment is visible in the log.
+            cfg = _load_sprint_or_die(root, sprint)
+            for res in resolutions:
+                if res["action"] in ("merge", "reject"):
+                    _emit_digest(
+                        root,
+                        _digest.render_pr_terminal(
+                            pr=prs[res["pr"]], quorum=cfg.approval_quorum
+                        ),
+                    )
+            resolved_prs = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint],
+                key=lambda p: p.created_at,
+            )
+            _emit_digest(
+                root,
+                _digest.render_ledger(
+                    resolved_prs,
+                    quorum=cfg.approval_quorum,
+                    round_label="DEADLOCKS RESOLVED",
+                ),
+            )
             typer.echo(json.dumps({"resolved": resolutions}))
     except StateLockTimeout as e:
         raise _err(str(e)) from e

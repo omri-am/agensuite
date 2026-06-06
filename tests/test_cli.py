@@ -1008,6 +1008,7 @@ class TestDigestSink:
         assert "Postgres over Dynamo" in p.stderr
         log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
         assert "Postgres over Dynamo" in log
+        assert "\x1b[" not in log  # log must stay free of ANSI escape codes
 
 
 class TestTerminalAndGateEmit:
@@ -1070,3 +1071,75 @@ class TestDebateDigestCommand:
         log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
         assert "locked the data layer on Postgres" in log
         assert "CEO DEBRIEF" in log
+
+
+class TestReviewFindingFixes:
+    def test_digest_full_emits_per_pr_status(self, cli, project_root):
+        cli("bootstrap")
+        cli("branch", "create", "feat/a/x")
+        (project_root / "workspace" / "wt" / "feat__a__x" / "doc.md").write_text("draft\n")
+        cli("commit", "--branch", "feat/a/x", "--author", "a",
+            "--message", "d", "--files", "doc.md")
+        pr = cli("pr", "open", "--branch", "feat/a/x", "--author", "a",
+                 "--title", "T", "--sprint", "s", "--headline", "claim X",
+                 "--files", "doc.md").stdout.strip()
+        p = cli("debate", "digest", "--sprint", "s", "--full")
+        # --full adds a per-PR status line (the PR id) under the ledger
+        assert pr in p.stderr
+
+    def test_digest_note_skips_state_read(self, cli, project_root):
+        # No bootstrap / no sprint state required: the note path must not
+        # depend on loading sprint config or PRs.
+        (project_root / "state").mkdir(parents=True, exist_ok=True)
+        cli("debate", "digest", "--sprint", "s", "--note", "ledger-free debrief")
+        log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
+        assert "ledger-free debrief" in log
+
+    def _open_pr(self, cli, project_root: Path, role: str, br: str, path: str) -> str:
+        cli("branch", "create", br)
+        slug = br.replace("/", "__")
+        f = project_root / "workspace" / "wt" / slug / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"draft by {role}\n")
+        cli("commit", "--branch", br, "--author", role,
+            "--message", f"{role} draft", "--files", path)
+        return cli("pr", "open", "--branch", br, "--author", role,
+                   "--title", f"{role}: t", "--sprint", "s",
+                   "--headline", f"{role} claim", "--files", path).stdout.strip()
+
+    def _drive_to_deadlock(self, cli, project_root: Path) -> str:
+        cli("bootstrap")
+        pr_a = self._open_pr(cli, project_root, "a", "feat/a/x", "fa.md")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "b",
+            "--comment", "lgtm", "--verdict", "APPROVE", "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "blocker", "--verdict", "REQUEST_CHANGES", "--phase", "REVIEW")
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "a",
+            "--comment", "see commit X", "--verdict", "COMMENT", "--phase", "REBUTTAL")
+        debate = json.loads(
+            (project_root / "state" / "debates" / "s.json").read_text()
+        )["debate"]
+        rebuttal_idx = next(
+            i for i, t in enumerate(debate["schedule"]) if t["phase"] == "REBUTTAL"
+        )
+        cli("pr", "comment", "--id", pr_a, "--reviewer", "c",
+            "--comment", "still blocked", "--verdict", "REQUEST_CHANGES",
+            "--phase", "FOLLOWUP", "--parent-turn-idx", str(rebuttal_idx))
+        return pr_a
+
+    def test_resolve_deadlocks_emits_terminal_and_ledger(
+        self, cli, project_root, cli_env
+    ):
+        pr_a = self._drive_to_deadlock(cli, project_root)
+        # Human picks merge ('m'); the loop must emit a terminal line + ledger.
+        r = subprocess.run(
+            [sys.executable, "-m", "agensuite.cli", "human-gate",
+             "--sprint", "s", "--resolve-deadlocks"],
+            cwd=str(project_root), env=cli_env, input="m\n",
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "🟢" in r.stderr                      # merged PR terminal line
+        assert "DEADLOCKS RESOLVED" in r.stderr      # closing ledger snapshot
+        log = (project_root / "state" / "debate-log.md").read_text(encoding="utf-8")
+        assert "DEADLOCKS RESOLVED" in log

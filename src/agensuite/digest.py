@@ -86,14 +86,19 @@ def _locked_cells(prs: list[PullRequest]) -> list[str]:
     return [f"• {_claim(pr)}" for pr in prs if pr.status == PRStatus.MERGED]
 
 
-def _contested_cells(prs: list[PullRequest], quorum: int) -> list[str]:
+def _contested_cells(prs: list[PullRequest]) -> list[str]:
     cells: list[str] = []
     for pr in prs:
         if pr.open_change_requests or pr.status == PRStatus.DEADLOCKED:
             counters = [r.counter.strip() for r in pr.reviews
                         if r.verdict == Verdict.REQUEST_CHANGES and r.counter.strip()]
             opt_b = counters[-1] if counters else "change requested"
-            lean = "leaning B" if pr.approval_count < quorum else "leaning A"
+            # Lean compares the two head-counts: approvals vs open objectors.
+            lean = (
+                "leaning A"
+                if pr.approval_count > len(pr.open_change_requests)
+                else "leaning B"
+            )
             cells.append(f"• {_claim(pr)}")
             cells.append(f"    A: {_claim(pr)}  B: {opt_b}")
             cells.append(f"    {lean} · open: {', '.join(pr.open_change_requests) or '—'}")
@@ -115,7 +120,7 @@ def render_ledger(
     data-cell alignment.
     """
     left = ["✅ LOCKED", "─" * 14, *_locked_cells(prs)]
-    right = ["❓ CONTESTED", "─" * 16, *_contested_cells(prs, quorum)]
+    right = ["❓ CONTESTED", "─" * 16, *_contested_cells(prs)]
     rows = max(len(left), len(right))
     lines: list[str] = []
     if round_label:
