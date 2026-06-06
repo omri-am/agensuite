@@ -30,6 +30,7 @@ from typing import Optional
 import typer
 import yaml
 
+from . import digest as _digest
 from .git_engine import GitCommandError, GitEngine, MergeConflict
 from .models import (
     DebateState,
@@ -280,6 +281,27 @@ def _short_id(*parts: str) -> str:
     """
     h = hashlib.sha1("\x00".join(parts).encode("utf-8")).hexdigest()
     return h[:6]
+
+
+def _debate_log_path(root: Path) -> Path:
+    return root / "state" / "debate-log.md"
+
+
+def _emit_digest(root: Path, text: str) -> None:
+    """Print ``text`` to stderr (ANSI on a TTY) and append the plain form to
+    ``state/debate-log.md``. Append failure warns to stderr but never aborts
+    the caller — the state write is the source of truth.
+    """
+    tty = sys.stderr.isatty()
+    for line in text.splitlines() or [text]:
+        typer.echo(_digest.colorize(line, tty=tty), err=True)
+    path = _debate_log_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n")
+    except OSError as e:
+        typer.echo(f"warning: could not append to {path}: {e}", err=True)
 
 
 def _load_sprint_or_die(root: Path, sprint_id: str) -> SprintConfig:
@@ -658,6 +680,8 @@ def pr_open(
     sprint: str = typer.Option(..., "--sprint"),
     files: list[str] = typer.Option([], "--files"),
     description: str = typer.Option("", "--description"),
+    headline: str = typer.Option("", "--headline",
+        help="One-line product claim this PR makes (feeds the decision ledger)."),
     base: str = typer.Option("main", "--base"),
 ) -> None:
     """Open a PR and refresh the sprint's debate schedule.
@@ -697,6 +721,7 @@ def pr_open(
                 base=base,
                 author=author,
                 description=description,
+                headline=headline,
                 files=list(files),
                 status=PRStatus.OPEN,
                 sprint_id=sprint,
@@ -785,6 +810,9 @@ def pr_comment(
         "--parent-turn-idx",
         help="Required for FOLLOWUP: index of the REBUTTAL slot being answered.",
     ),
+    counter: str = typer.Option("", "--counter",
+        help="One-line alternative you push (use with --verdict REQUEST_CHANGES); "
+             "feeds the contested column of the ledger."),
 ) -> None:
     """Append a review to a PR and a REVIEW message to the sprint transcript.
 
@@ -847,6 +875,7 @@ def pr_comment(
                 comment=comment,
                 verdict=verdict,
                 phase=phase,
+                counter=counter,
             )
             pr.reviews.append(review)
             _recompute_pr_status(pr)
@@ -890,6 +919,12 @@ def pr_comment(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    _emit_digest(
+        root,
+        _digest.render_verdict_line(
+            pr=pr, comment=review, round_idx=round_idx, quorum=cfg.approval_quorum
+        ),
+    )
     typer.echo(
         json.dumps(
             {
@@ -1134,6 +1169,15 @@ def pr_merge(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    # Successful merge only (a conflict raises typer.Exit inside the block).
+    cfg = _load_sprint_or_die(root, prs[id].sprint_id)
+    sprint_prs = sorted(
+        [p for p in prs.values() if p.sprint_id == prs[id].sprint_id],
+        key=lambda p: p.created_at,
+    )
+    _emit_digest(root, _digest.render_pr_terminal(pr=prs[id], quorum=cfg.approval_quorum))
+    _emit_digest(root, _digest.render_ledger(sprint_prs, quorum=cfg.approval_quorum))
+
     typer.echo(sha)
 
 
@@ -1231,6 +1275,7 @@ def debate_next_turn(
     a turn is "consumed" only after it has been durably persisted.
     """
     root = _root(ctx)
+    emit_ledger_for_round: Optional[str] = None
     try:
         with state_lock(root):
             cfg = _load_sprint_or_die(root, sprint)
@@ -1263,6 +1308,10 @@ def debate_next_turn(
                 turn = candidate
                 debate.advance()
                 break
+
+            if turn is not None and turn.round_idx > debate.last_emitted_round:
+                debate.last_emitted_round = turn.round_idx
+                emit_ledger_for_round = f"ROUND {turn.round_idx}"
 
             DebateStore.save(root, debate)
 
@@ -1306,6 +1355,14 @@ def debate_next_turn(
         raise _err(str(e)) from e
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
+
+    if emit_ledger_for_round is not None:
+        _emit_digest(
+            root,
+            _digest.render_ledger(
+                sprint_prs, quorum=cfg.approval_quorum, round_label=emit_ledger_for_round
+            ),
+        )
 
     target_pr = next(p for p in sprint_prs if p.id == turn.target_pr_id)
     result: dict = {
@@ -1379,6 +1436,60 @@ def debate_tail(
     )
 
 
+@debate_app.command("digest")
+def debate_digest(
+    ctx: typer.Context,
+    sprint: str = typer.Option(..., "--sprint"),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Also emit a per-PR status line under the ledger.",
+    ),
+    note: Optional[str] = typer.Option(
+        None,
+        "--note",
+        help="Append a CEO prose product debrief to stderr + the log.",
+    ),
+) -> None:
+    """Render the decision ledger on demand, and/or append a CEO narrative note.
+
+    The orchestrator calls this at a human-gate after spawning the CEO
+    subagent: it pipes the CEO's prose product debrief in via ``--note`` so it
+    lands in ``state/debate-log.md`` alongside the deterministic ledger.
+    """
+    root = _root(ctx)
+
+    # The note carries its own text — no state read needed, so skip the lock.
+    if note is not None:
+        _emit_digest(root, f"📣 CEO DEBRIEF — {sprint}\n{note.strip()}")
+        return
+
+    try:
+        with state_lock(root):
+            cfg = _load_sprint_or_die(root, sprint)
+            prs = PRRegistry.load(root)
+            sprint_prs = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint],
+                key=lambda p: p.created_at,
+            )
+    except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
+
+    _emit_digest(
+        root,
+        _digest.render_ledger(
+            sprint_prs, quorum=cfg.approval_quorum, round_label="DIGEST"
+        ),
+    )
+    if full:
+        for pr in sprint_prs:
+            _emit_digest(
+                root, _digest.render_pr_terminal(pr=pr, quorum=cfg.approval_quorum)
+            )
+
+
 # ---------------------------------------------------------------------------
 # human-gate
 # ---------------------------------------------------------------------------
@@ -1426,6 +1537,8 @@ def human_gate(
     follow-up, and applies the human's choice. This is the only path that
     can merge a PR whose status is DEADLOCKED.
     """
+    root = _root(ctx)
+
     if async_gate and not resolve_deadlocks:
         raise _err("--async requires --resolve-deadlocks")
 
@@ -1454,6 +1567,24 @@ def human_gate(
     typer.echo(f"\n{bar}")
     typer.echo(f"  HUMAN GATE: {message}")
     typer.echo(f"{bar}")
+
+    # Surface the decision ledger so the human sees the plan's standing before
+    # deciding. Best-effort: a missing/locked state never blocks the gate. Runs
+    # before the tty check so the ledger is recorded even on the fail-closed path.
+    if sprint:
+        try:
+            with state_lock(root):
+                cfg = _load_sprint_or_die(root, sprint)
+                prs = PRRegistry.load(root)
+                sprint_prs = sorted(
+                    [p for p in prs.values() if p.sprint_id == sprint],
+                    key=lambda p: p.created_at,
+                )
+            _emit_digest(root, _digest.render_ledger(
+                sprint_prs, quorum=cfg.approval_quorum, round_label="HUMAN GATE"))
+        except (StateLockTimeout, StateSchemaMismatch):
+            pass
+
     if sys.stdin.isatty():
         input("press Enter to continue: ")
         return
@@ -1575,6 +1706,30 @@ def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
                     resolutions.append({"pr": pr.id, "action": "skip"})
 
             PRRegistry.save(root, prs)
+
+            # Emit a terminal line per resolved PR + a closing ledger so the
+            # human-gate's primary resolution moment is visible in the log.
+            cfg = _load_sprint_or_die(root, sprint)
+            for res in resolutions:
+                if res["action"] in ("merge", "reject"):
+                    _emit_digest(
+                        root,
+                        _digest.render_pr_terminal(
+                            pr=prs[res["pr"]], quorum=cfg.approval_quorum
+                        ),
+                    )
+            resolved_prs = sorted(
+                [p for p in prs.values() if p.sprint_id == sprint],
+                key=lambda p: p.created_at,
+            )
+            _emit_digest(
+                root,
+                _digest.render_ledger(
+                    resolved_prs,
+                    quorum=cfg.approval_quorum,
+                    round_label="DEADLOCKS RESOLVED",
+                ),
+            )
             typer.echo(json.dumps({"resolved": resolutions}))
     except StateLockTimeout as e:
         raise _err(str(e)) from e

@@ -34,7 +34,7 @@ from .models import DebateState, PullRequest
 # previous format. Old state files trigger a friendly "run bootstrap
 # --reset" error rather than a cryptic Pydantic ValidationError — state is
 # regenerable from ``sprints/*.md`` so there's no migration path.
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 class StateSchemaMismatch(ValueError):

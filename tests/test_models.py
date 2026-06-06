@@ -222,6 +222,31 @@ class TestSprintConfigRebuttalDepth:
             )
 
 
+def test_pullrequest_headline_defaults_empty():
+    from agensuite.models import PullRequest
+    pr = PullRequest(id="pr-1", title="t", branch="b", author="a", sprint_id="s")
+    assert pr.headline == ""
+    pr2 = PullRequest(
+        id="pr-2", title="t", branch="b", author="a", sprint_id="s",
+        headline="Postgres over Dynamo for sub-50ms reads",
+    )
+    assert pr2.headline == "Postgres over Dynamo for sub-50ms reads"
+
+
+def test_reviewcomment_counter_defaults_empty():
+    from agensuite.models import ReviewComment
+    rc = ReviewComment(reviewer="a", comment="c")
+    assert rc.counter == ""
+    rc2 = ReviewComment(reviewer="a", comment="c", counter="per-entity TTL policy")
+    assert rc2.counter == "per-entity TTL policy"
+
+
+def test_debatestate_last_emitted_round_defaults_minus_one():
+    from agensuite.models import DebateState
+    ds = DebateState(sprint_id="s")
+    assert ds.last_emitted_round == -1
+
+
 def test_notify_config_defaults_and_validation():
     from agensuite.models import NotifyConfig
 
