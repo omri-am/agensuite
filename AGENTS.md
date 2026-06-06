@@ -55,6 +55,8 @@ You play the **CEO**. You will:
 | Sprint config (YAML frontmatter + body)  | `sprints/sprint-{n}.md`           | Both        |
 | Next-sprint authoring                    | CEO subagent post-ADR             | LLM only    |
 | Deadlock resolution                      | `agensuite human-gate --resolve-deadlocks` | Both |
+| Chat notifications (outbound)            | `agensuite notify` / `adr record` / `human-gate --async` | Both |
+| Chat-driven deadlock resolution          | `agensuite bot` + `human-gate --drain`    | Both |
 
 If you find yourself paraphrasing persona text, stop — spawn the
 subagent instead. If you find yourself touching `state/*.json` or
@@ -200,6 +202,79 @@ reviewers post `REQUEST_CHANGES` (which appends one REBUTTAL slot) or
 authors post a REBUTTAL (which appends one FOLLOWUP slot per open
 change-requester).
 
+### Chat integration (opt-in, Telegram-first)
+
+By default every `human-gate` call blocks on stdin and every `adr record`
+call is silent. An optional Telegram channel can replace the blocking prompt
+with async button taps and add outbound event notices. Nothing in this section
+is required — if unconfigured, the original terminal stdin behavior is
+completely unchanged.
+
+**Enabling.** Create `state/notify.json` (the `state/` directory is
+gitignored; never commit this file) and export `AGENSUITE_TELEGRAM_TOKEN`
+in the environment where the agent runs. The token must live only in the
+environment variable — never in a file:
+
+```json
+{
+  "channel": "telegram",
+  "chat_id": "<your-chat-id>",
+  "events": ["gate", "decision", "sprint-start"]
+}
+```
+
+If `state/notify.json` is absent, malformed, or `AGENSUITE_TELEGRAM_TOKEN`
+is unset, a `NullNotifier` is used and every send is a no-op. Call sites
+never branch on an "enabled" flag — the notifier seam handles degradation
+transparently.
+
+**Outbound events** (fired only when configured and the event name appears in
+`events`):
+
+- `agensuite notify sprint-start --sprint <s>` — call at the top of the loop
+  (just before spoke drafting) to announce the new sprint.
+- `agensuite adr record --sprint <s>` — after persisting the ADR also sends
+  the decision summary (event `"decision"`).
+- `agensuite human-gate --sprint <s> --resolve-deadlocks --async` — sends one
+  inline-keyboard message per deadlocked PR with Merge / Reject / ADR-options
+  / Skip buttons, then returns `{"status":"awaiting_human","pending":[...]}`.
+  This call does **not** block on stdin.
+
+**Inbound flow (chat-driven deadlock resolution).** Use this sequence when
+chat is configured and you want human decisions to arrive from the chat rather
+than the terminal:
+
+```
+# 1. Start the relay sidecar once; keep it running throughout the sprint.
+agensuite bot          # long-polls Telegram, appends button taps to
+                       # state/gate_inbox.json — never touches the PR registry.
+
+# 2. Raise the async gate (after the debate loop exits with reason="deadlocked").
+agensuite human-gate --sprint <s> --resolve-deadlocks --async
+#    → sends buttons to chat; returns immediately.
+
+# 3. Human taps buttons in Telegram.  The bot records each tap in the inbox.
+
+# 4. Apply taps and block until every pending PR is resolved.
+agensuite human-gate --sprint <s> --drain --wait
+#    → polls state/gate_inbox.json locally until all PRs resolve
+#      (or --timeout elapses).  A skipped or merge-failed PR remains in
+#      still_pending and is never silently dropped.
+
+# 5. Proceed to ADR as normal.
+agensuite adr record --sprint <s>
+```
+
+The bot is a **dumb relay** — it validates button taps against the pending
+gate and appends them to the inbox, but it never mutates the PR registry.
+All state mutations still flow through `--drain` under the state lock,
+preserving the same invariants as the stdin path.
+
+**Default (no chat).** When `state/notify.json` does not exist or
+`AGENSUITE_TELEGRAM_TOKEN` is unset, use `human-gate --resolve-deadlocks`
+(without `--async`) and `human-gate --message` as shown in the main sprint
+loop above. No code change is needed; the CLI degrades silently.
+
 ## 5. Native Subagent Spawning — Platform Hints
 
 The CLI contract is canonical. Native subagent dispatch is platform-specific:
@@ -288,6 +363,10 @@ agensuite debate next-turn --sprint <s> # returns turn JSON with phase/prompt_hi
 agensuite debate tail --sprint <s> [--window 6]
 agensuite human-gate --message <msg>
 agensuite human-gate --sprint <s> --resolve-deadlocks  # walks DEADLOCKED PRs
+agensuite human-gate --sprint <s> --resolve-deadlocks --async  # chat: send buttons, return now
+agensuite human-gate --sprint <s> --drain [--wait]            # chat: apply button taps
+agensuite notify sprint-start --sprint <s>                     # chat: kickoff notice
+agensuite bot [--once]                                         # chat: Telegram relay sidecar
 agensuite adr record --sprint <s>
 ```
 

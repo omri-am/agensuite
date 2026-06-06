@@ -44,6 +44,8 @@ from .models import (
     TurnPhase,
     Verdict,
 )
+from .gate_mailbox import GateMailbox, PendingGate, PendingPR
+from .notify import load_notifier, _telegram_call
 from .sprint_loader import SprintParseError, list_sprints, load_sprint
 from .state import (
     DebateStore,
@@ -95,6 +97,7 @@ chief_app = typer.Typer(
     help="Customize executive personas without opening files.",
     no_args_is_help=True,
 )
+notify_app = typer.Typer(help="Outbound chat notifications.", no_args_is_help=True)
 
 app.add_typer(pr_app, name="pr")
 app.add_typer(sprint_app, name="sprint")
@@ -102,6 +105,7 @@ app.add_typer(debate_app, name="debate")
 app.add_typer(adr_app, name="adr")
 app.add_typer(state_app, name="state")
 app.add_typer(chief_app, name="chief")
+app.add_typer(notify_app, name="notify")
 
 
 # ---------------------------------------------------------------------------
@@ -1391,6 +1395,23 @@ def human_gate(
         help="Iterate over DEADLOCKED PRs in --sprint and prompt the human "
              "to [m]erge / [r]eject / [a]dr-options / [s]kip each one.",
     ),
+    async_gate: bool = typer.Option(
+        False, "--async",
+        help="Chat mode: write the gate to state/ + send buttons, then return "
+             "immediately ({status: awaiting_human}) instead of blocking on stdin.",
+    ),
+    drain: bool = typer.Option(
+        False, "--drain",
+        help="Chat mode: apply human choices collected in state/gate_inbox.json.",
+    ),
+    wait: bool = typer.Option(
+        False, "--wait",
+        help="With --drain: block (polling the local inbox file) until every "
+             "pending PR is resolved or --timeout elapses.",
+    ),
+    timeout: float = typer.Option(
+        600.0, "--timeout", help="With --drain --wait: max seconds to wait."
+    ),
 ) -> None:
     """Default mode: print a banner and block on stdin until Enter.
 
@@ -1399,6 +1420,21 @@ def human_gate(
     follow-up, and applies the human's choice. This is the only path that
     can merge a PR whose status is DEADLOCKED.
     """
+    if async_gate and not resolve_deadlocks:
+        raise _err("--async requires --resolve-deadlocks")
+
+    if drain:
+        if not sprint:
+            raise _err("--drain requires --sprint <id>")
+        _drain_gate(ctx, sprint, wait=wait, timeout=timeout)
+        return
+
+    if resolve_deadlocks and async_gate:
+        if not sprint:
+            raise _err("--resolve-deadlocks requires --sprint <id>")
+        _async_gate(ctx, sprint)
+        return
+
     if resolve_deadlocks:
         if not sprint:
             raise _err("--resolve-deadlocks requires --sprint <id>")
@@ -1527,6 +1563,222 @@ def _resolve_deadlocks_loop(ctx: typer.Context, sprint: str) -> None:
         raise _err(str(e)) from e
 
 
+def _async_gate(ctx: typer.Context, sprint: str) -> None:
+    """Chat mode: persist the deadlocked PRs + send buttons, then return.
+
+    Unlike :func:`_resolve_deadlocks_loop` this never blocks on stdin; the
+    human answers from chat and the orchestrator later calls
+    ``human-gate --drain``.
+    """
+    root = _root(ctx)
+    try:
+        with state_lock(root):
+            prs = PRRegistry.load(root)
+            deadlocked = sorted(
+                [p for p in prs.values()
+                 if p.sprint_id == sprint and p.status == PRStatus.DEADLOCKED],
+                key=lambda p: p.created_at,
+            )
+            pending = PendingGate(
+                sprint_id=sprint,
+                prs=[PendingPR(pr_id=p.id, title=p.title) for p in deadlocked],
+            )
+            mb = GateMailbox(root)
+            mb.save_pending(pending)
+            mb.clear_inbox()
+        # send outside the lock — network must not hold the state mutex. Skip
+        # the send when there are no deadlocks: a "decision needed" message
+        # with zero buttons would only confuse the human.
+        if deadlocked:
+            load_notifier(root).send_gate(pending)
+        typer.echo(json.dumps(
+            {"status": "awaiting_human", "pending": [p.id for p in deadlocked]}
+        ))
+    except StateLockTimeout as e:
+        raise _err(str(e)) from e
+    except StateSchemaMismatch as e:
+        raise _err(str(e)) from e
+
+
+def _drain_gate(
+    ctx: typer.Context, sprint: str, *, wait: bool, timeout: float
+) -> None:
+    """Apply human choices from the inbox to the gate's pending PRs.
+
+    Applies each inbox entry via the SAME primitives as the stdin loop
+    (:func:`_merge_pr` / reject / adr-options / skip). A PR is dropped from
+    pending only when it reaches a terminal outcome (merge / reject /
+    adr-options). A merge conflict makes the PR terminal (→REJECTED) and also
+    drops it from pending; only a transient git error (PR stays DEADLOCKED) and
+    an explicit skip ("come back later") leave the PR in pending so it remains
+    re-actionable — matching the stdin loop, which never silently removes a
+    transiently-failed or skipped PR.
+
+    With ``--wait`` it re-reads the inbox on an interval until pending is empty
+    or ``timeout`` elapses, accumulating every iteration's resolutions into the
+    final JSON. The poll is over the LOCAL inbox file, not the network — the
+    bot is the only process doing network I/O.
+    """
+    import time
+
+    root = _root(ctx)
+    mb = GateMailbox(root)
+    deadline = None  # set lazily; monotonic clock (Date.now-free)
+    poll_interval = 2.0
+    # Accumulated across --wait iterations so the final JSON reports every PR
+    # resolved over the whole wait, not just the last poll's batch.
+    all_resolved: list[dict] = []
+
+    while True:
+        resolved: list[dict] = []
+        try:
+            with state_lock(root):
+                prs = PRRegistry.load(root)
+                pending = mb.load_pending()
+                if pending is None:
+                    typer.echo(json.dumps(
+                        {"resolved": all_resolved, "still_pending": []}
+                    ))
+                    return
+                pending_ids = {p.pr_id for p in pending.prs}
+                inbox = mb.load_inbox()
+                for entry in inbox:
+                    if entry.pr_id not in pending_ids:
+                        continue  # tap for an already-resolved / unknown PR
+                    if entry.choice == "m":
+                        try:
+                            sha = _merge_pr(ctx, prs, entry.pr_id, force_deadlock=True)
+                            resolved.append({"pr": entry.pr_id, "action": "merge", "sha": sha})
+                            pending_ids.discard(entry.pr_id)  # terminal
+                        except typer.Exit:
+                            # A merge conflict makes the PR terminal (REJECTED):
+                            # drop it from pending so it can't loop forever. A
+                            # transient git error leaves it DEADLOCKED — keep it
+                            # pending so the human can retry.
+                            resolved.append({"pr": entry.pr_id, "action": "merge_failed"})
+                            if prs[entry.pr_id].status == PRStatus.REJECTED:
+                                pending_ids.discard(entry.pr_id)
+                    elif entry.choice == "r":
+                        prs[entry.pr_id].status = PRStatus.REJECTED
+                        resolved.append({"pr": entry.pr_id, "action": "reject"})
+                        pending_ids.discard(entry.pr_id)  # terminal
+                    elif entry.choice == "a":
+                        prs[entry.pr_id].human_disposition = "adr_options"
+                        resolved.append({"pr": entry.pr_id, "action": "adr_options"})
+                        pending_ids.discard(entry.pr_id)  # terminal
+                    else:  # "s" — defer; leave the PR in pending for later
+                        resolved.append({"pr": entry.pr_id, "action": "skip"})
+                PRRegistry.save(root, prs)
+                mb.clear_inbox()
+                pending.prs = [p for p in pending.prs if p.pr_id in pending_ids]
+                mb.save_pending(pending)
+                still_pending = [p.pr_id for p in pending.prs]
+        except StateLockTimeout as e:
+            raise _err(str(e)) from e
+        except StateSchemaMismatch as e:
+            raise _err(str(e)) from e
+
+        all_resolved.extend(resolved)
+
+        # emit this batch's outcomes to chat (outside the lock; never fatal)
+        notifier = load_notifier(root)
+        for r in resolved:
+            notifier.send("Gate", f"{r['pr']}: {r['action']}", event="gate")
+
+        if not wait or not still_pending:
+            typer.echo(json.dumps(
+                {"resolved": all_resolved, "still_pending": still_pending}
+            ))
+            return
+
+        # --wait: sleep then loop. Use monotonic so we never read wall-clock.
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        if time.monotonic() >= deadline:
+            typer.echo(json.dumps(
+                {"resolved": all_resolved, "still_pending": still_pending}
+            ))
+            return
+        time.sleep(poll_interval)
+
+
+# ---------------------------------------------------------------------------
+# bot sidecar
+# ---------------------------------------------------------------------------
+
+
+def _bot_poll_once(token: str, mailbox: "GateMailbox") -> int:
+    """Process one ``getUpdates`` batch. Returns the next offset.
+
+    Pure relay: validates each ``callback_query`` against gate_pending and
+    appends legal taps to the inbox. Never touches the PR registry. Always
+    advances the offset past every update so a poisoned update can't wedge
+    the bot.
+    """
+    offset = mailbox.load_offset()
+    # Long-poll hold must stay comfortably below the 30s socket timeout in
+    # ``notify._telegram_call`` or the socket trips before Telegram closes the
+    # poll cleanly. 20s leaves a 10s margin.
+    resp = _telegram_call(
+        token, "getUpdates", {"offset": offset, "timeout": 20}
+    )
+    next_offset = offset
+    for update in resp.get("result", []):
+        next_offset = max(next_offset, int(update["update_id"]) + 1)
+        cq = update.get("callback_query")
+        if not cq:
+            continue
+        data = cq.get("data", "")
+        pr_id, _, choice = data.partition(":")
+        if mailbox.is_legal(pr_id, choice):
+            mailbox.append_inbox(pr_id=pr_id, choice=choice)
+        # Acknowledge the tap so Telegram clears the client spinner. A missing
+        # id (malformed payload) must not drop the already-recorded tap.
+        cq_id = cq.get("id")
+        if cq_id:
+            try:
+                _telegram_call(token, "answerCallbackQuery", {"callback_query_id": cq_id})
+            except Exception:  # noqa: BLE001
+                pass
+    mailbox.save_offset(next_offset)
+    return next_offset
+
+
+@app.command("bot")
+def bot(
+    ctx: typer.Context,
+    once: bool = typer.Option(
+        False, "--once", help="Process a single update batch then exit (for testing)."
+    ),
+    poll_interval: float = typer.Option(
+        1.0, "--poll-interval", help="Seconds between getUpdates batches."
+    ),
+) -> None:
+    """Run the Telegram relay sidecar: long-poll updates, record button taps.
+
+    Reads the token from ``AGENSUITE_TELEGRAM_TOKEN``. The bot never mutates
+    simulation state — it only appends validated taps to state/gate_inbox.json,
+    which ``human-gate --drain`` later applies under the state lock.
+    """
+    import os
+    import time
+
+    root = _root(ctx)
+    token = os.environ.get("AGENSUITE_TELEGRAM_TOKEN")
+    if not token:
+        raise _err("AGENSUITE_TELEGRAM_TOKEN is not set; cannot start bot")
+    mailbox = GateMailbox(root)
+    typer.echo("bot: polling Telegram (Ctrl-C to stop)", err=True)
+    while True:
+        try:
+            _bot_poll_once(token, mailbox)
+        except Exception as e:  # noqa: BLE001 — a relay must survive transient errors
+            typer.echo(f"bot: poll error: {e}", err=True)
+        if once:
+            return
+        time.sleep(poll_interval)
+
+
 # ---------------------------------------------------------------------------
 # adr
 # ---------------------------------------------------------------------------
@@ -1640,7 +1892,29 @@ def adr_record(
     except StateSchemaMismatch as e:
         raise _err(str(e)) from e
 
+    load_notifier(root).send("Decision", decision, event="decision")
     typer.echo(json.dumps({"adr_id": adr_id, "sha": sha}))
+
+
+# ---------------------------------------------------------------------------
+# notify
+# ---------------------------------------------------------------------------
+
+
+@notify_app.command("sprint-start")
+def notify_sprint_start(
+    ctx: typer.Context,
+    sprint: str = typer.Option(..., "--sprint"),
+) -> None:
+    """Send a 'sprint started' notice to chat (no-op if chat unconfigured)."""
+    root = _root(ctx)
+    cfg = _load_sprint_or_die(root, sprint)
+    load_notifier(root).send(
+        "Sprint start",
+        f"{cfg.id}: {cfg.title}\nParticipants: {', '.join(cfg.participants)}",
+        event="sprint-start",
+    )
+    typer.echo(json.dumps({"notified": "sprint-start", "sprint": sprint}))
 
 
 # ---------------------------------------------------------------------------

@@ -220,3 +220,16 @@ class TestSprintConfigRebuttalDepth:
                 id="s", title="t", participants=["a", "b"],
                 debate_rounds=1, approval_quorum=1, rebuttal_depth=4,
             )
+
+
+def test_notify_config_defaults_and_validation():
+    from agensuite.models import NotifyConfig
+
+    cfg = NotifyConfig(chat_id="123456")
+    assert cfg.channel == "telegram"
+    assert cfg.chat_id == "123456"
+    assert cfg.events == ["gate", "decision", "sprint-start"]
+
+    # extra keys are rejected so a typo'd config fails loudly
+    with pytest.raises(ValidationError):
+        NotifyConfig(chat_id="1", bogus=True)
