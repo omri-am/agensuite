@@ -40,7 +40,7 @@ def test_render_verdict_line_request_changes():
     assert line.startswith("🔴 r1 · cto → pr-2")
     assert "90-day flat TTL" in line
     assert "GDPR minimization" in line
-    assert "●○" in line
+    assert "○○" in line
     assert "open: cto" in line
 
 

@@ -55,7 +55,7 @@ def render_verdict_line(
     """One-line VERDICT digest. Kept short so per-turn scrollback stays readable."""
     glyph = VERDICT_GLYPH.get(comment.verdict, "💬")
     crit = truncate(comment.comment, 70)
-    m = meter(len(pr.reviews), quorum)
+    m = meter(pr.approval_count, quorum)
     parts = [
         f'{glyph} r{round_idx} · {comment.reviewer} → {pr.id} ({_claim(pr)})',
         f'"{crit}"',
